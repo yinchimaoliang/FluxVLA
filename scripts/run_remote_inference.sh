@@ -33,6 +33,12 @@
 set -euo pipefail
 
 # ──────────────────────────────────────────────────────────────────────
+# Bypass proxy for localhost (health check + inference client)
+# ──────────────────────────────────────────────────────────────────────
+export no_proxy="localhost,127.0.0.1"
+export NO_PROXY="localhost,127.0.0.1"
+
+# ──────────────────────────────────────────────────────────────────────
 # Resolve project directory
 # ──────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -243,7 +249,7 @@ interval=3
 max_interval=10
 
 while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
-    if response=$(curl -sf --max-time 5 "$HEALTH_URL" 2>/dev/null); then
+    if response=$(curl -sf --noproxy localhost,127.0.0.1 --max-time 5 "$HEALTH_URL" 2>/dev/null); then
         if echo "$response" | grep -q '"ready"'; then
             echo "[health] Server is ready! (after ${elapsed}s)"
             break
@@ -278,11 +284,7 @@ echo "[client] Config: ${LOCAL_CONFIG}"
 
 python "${PROJECT_DIR}/scripts/inference_remote.py" \
     --config "${PROJECT_DIR}/${LOCAL_CONFIG}" \
-    --server-url "http://localhost:${SERVER_PORT}" &
-LOCAL_CLIENT_PID=$!
-
-wait $LOCAL_CLIENT_PID || true
+    --server-url "http://localhost:${SERVER_PORT}"
 LOCAL_CLIENT_EXIT=$?
-LOCAL_CLIENT_PID=""
 
 exit ${LOCAL_CLIENT_EXIT}

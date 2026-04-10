@@ -375,6 +375,7 @@ huggingface-cli download limxdynamics/FluxVLAEngine --include "pi05_paligemma_li
 - レイトレーシング非対応デバイスで libero を評価できます。
 - [RTC（Real-Time Chunking）](docs/rtc.md) をサポートし、チャンク間の軌跡の連続性を向上させます。
 - GR00T と PI0.5 の推論を高速化します。詳細は [Inference Acceleration](docs/inference_acceleration.md) を参照してください。Triton の融合カーネル、CUDA Graph のキャプチャ、CUDA のカスタム演算子が含まれます。
+- [リモート推論](docs/remote_inference.md)をサポートし、クラウド GPU でモデル推論を実行しながらロボットをローカルで制御できます。
 
 </details>
 
@@ -471,6 +472,24 @@ bash scripts/eval.sh [CONFIG] [CKPT_PATH] --cfg-options [CFG_OPTIONS]
 ```
 python scripts/inference_real_robot.py --config [CONFIG] -- ckpt-path [CKPT_PATH]
 ```
+
+</details>
+
+<details>
+<summary><b>リモート推論（ロボット + クラウド GPU）</b></summary>
+
+ロボット側のデバイスに強力な GPU がない場合、モデル推論をリモートの GPU サーバーにオフロードできます。ワンクリックスクリプトがすべてを自動処理します。ロボット側で以下を実行するだけです：
+
+```bash
+bash scripts/run_remote_inference.sh \
+    --host <リモートIP> \
+    --ssh-port <SSHポート> \
+    --remote-dir <リモートプロジェクトディレクトリ> \
+    --ckpt-path <リモートチェックポイントパス> \
+    --conda-env <Conda環境名>
+```
+
+スクリプトを使わない手動セットアップや全パラメータについては、[リモート推論ガイド](docs/remote_inference.md)を参照してください。
 
 </details>
 

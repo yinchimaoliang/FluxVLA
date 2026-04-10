@@ -375,6 +375,7 @@ huggingface-cli download limxdynamics/FluxVLAEngine --include "pi05_paligemma_li
 - Supports evaluating libero on devices without ray tracing.
 - Supports [RTC (Real-Time Chunking)](docs/rtc.md) to improve cross-chunk trajectory continuity.
 - Supports accelerated inference for GR00T and PI0.5; see [Inference Acceleration](docs/inference_acceleration.md), including Triton fused kernels, CUDA Graph capture, and CUDA custom operators.
+- Supports [Remote Inference](docs/remote_inference.md) for running model inference on a cloud GPU while controlling the robot locally.
 
 </details>
 
@@ -470,6 +471,24 @@ When running inference on a real robot, first install the environment on the rob
 ```
 python scripts/inference_real_robot.py --config [CONFIG] -- ckpt-path [CKPT_PATH]
 ```
+
+</details>
+
+<details>
+<summary><b>Remote inference (robot + cloud GPU)</b></summary>
+
+When the robot-side device does not have a powerful GPU, you can offload model inference to a remote GPU server. A one-click script handles everything -- just run on the robot side:
+
+```bash
+bash scripts/run_remote_inference.sh \
+    --host <REMOTE_IP> \
+    --ssh-port <SSH_PORT> \
+    --remote-dir <REMOTE_PROJECT_DIR> \
+    --ckpt-path <REMOTE_CHECKPOINT_PATH> \
+    --conda-env <CONDA_ENV_NAME>
+```
+
+For manual setup without the script, or full parameter reference, see [Remote Inference Guide](docs/remote_inference.md).
 
 </details>
 

@@ -375,6 +375,7 @@ huggingface-cli download limxdynamics/FluxVLAEngine --include "pi05_paligemma_li
 - 支持在无光追设备上评估 libero。
 - 支持 [RTC (Real-Time Chunking)](docs/rtc.md)，提升跨 chunk 轨迹连续性。
 - 支持 GR00T 与 PI0.5 推理加速；详见 [Inference Acceleration](docs/inference_acceleration.md)，包含 Triton 融合核、CUDA Graph 捕获与 CUDA 自定义算子。
+- 支持[远程推理](docs/remote_inference.md)，在云端 GPU 上运行模型推理，在本地控制机器人。
 
 </details>
 
@@ -471,6 +472,24 @@ bash scripts/eval.sh [CONFIG] [CKPT_PATH] --cfg-options [CFG_OPTIONS]
 ```
 python scripts/inference_real_robot.py --config [CONFIG] -- ckpt-path [CKPT_PATH]
 ```
+
+</details>
+
+<details>
+<summary><b>远程推理（机器人 + 云端 GPU）</b></summary>
+
+当机器人端设备没有强力 GPU 时，可将模型推理卸载到远程 GPU 服务器。一键脚本会自动完成所有操作——只需在机器人端执行：
+
+```bash
+bash scripts/run_remote_inference.sh \
+    --host <远程IP> \
+    --ssh-port <SSH端口> \
+    --remote-dir <远程项目目录> \
+    --ckpt-path <远程Checkpoint路径> \
+    --conda-env <Conda环境名>
+```
+
+如需手动分步部署或查看完整参数说明，请参阅[远程推理指南](docs/remote_inference.md)。
 
 </details>
 
