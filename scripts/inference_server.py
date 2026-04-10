@@ -271,7 +271,7 @@ def parse_args():
     parser.add_argument(
         '--mixed-precision-dtype',
         type=str,
-        default='bfloat16',
+        default='bf16',
         help='Mixed precision dtype (default: bfloat16).')
     parser.add_argument(
         '--disable-mixed-precision',
