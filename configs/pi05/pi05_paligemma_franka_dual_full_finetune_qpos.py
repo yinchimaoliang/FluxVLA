@@ -156,7 +156,8 @@ train_dataloader = dict(
                 data_root_path=  # noqa: E251
                 [
                     './datasets/RealRobot_franka_dual_lerobotv2.1/20260519_dual_franka_teleop',  # noqa: E501
-                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260520_dual_franka_teleop'  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260520_dual_franka_teleop',  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260521_dual_franka_teleop'  # noqa: E501
                 ],
                 action_key='observation.state',
                 transforms=[
