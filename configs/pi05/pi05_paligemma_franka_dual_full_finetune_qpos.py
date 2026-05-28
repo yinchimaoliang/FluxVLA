@@ -157,7 +157,11 @@ train_dataloader = dict(
                 [
                     './datasets/RealRobot_franka_dual_lerobotv2.1/20260519_dual_franka_teleop',  # noqa: E501
                     './datasets/RealRobot_franka_dual_lerobotv2.1/20260520_dual_franka_teleop',  # noqa: E501
-                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260521_dual_franka_teleop'  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260521_dual_franka_teleop',  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260522_dual_franka_teleop',  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260525_dual_franka_teleop',  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260526_dual_franka_teleop',  # noqa: E501
+                    './datasets/RealRobot_franka_dual_lerobotv2.1/20260527_dual_franka_teleop'  # noqa: E501
                 ],
                 action_key='observation.state',
                 transforms=[
