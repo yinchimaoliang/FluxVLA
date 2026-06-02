@@ -296,8 +296,9 @@ class DenormalizeRobocasaAction:
         action_dim: Number of active RoboCasa action dimensions.
         norm_type: Normalization type.
         clip_actions: If True, clip normalized actions to [-1, 1] first.
-        stats_order: Order of the flat action statistics. Only ``fluxvla`` is
-            supported by this transform.
+        stats_order: Order of the flat action statistics. Use ``native`` when
+            statistics already match the predicted action order, or ``fluxvla``
+            / ``fluxvla_to_n15`` to convert FluxVLA-order statistics to N1.5.
     """
 
     def __init__(self,
@@ -305,7 +306,7 @@ class DenormalizeRobocasaAction:
                  action_dim: int = 29,
                  norm_type: str = 'min_max',
                  clip_actions: bool = False,
-                 stats_order: str = 'fluxvla'):
+                 stats_order: str = 'native'):
         if isinstance(norm_stats, str):
             with open(norm_stats, 'r', encoding='utf-8') as f:
                 self.norm_stats = json.load(f)
@@ -314,13 +315,15 @@ class DenormalizeRobocasaAction:
         self.action_dim = action_dim
         self.norm_type = norm_type
         self.clip_actions = clip_actions
-        if stats_order != 'fluxvla':
+        if stats_order not in ('native', 'fluxvla', 'fluxvla_to_n15'):
             raise ValueError(
                 f'Unsupported stats_order={stats_order}. '
-                'Only existing FluxVLA RoboCasa statistics are supported.')
-        self.stats_permutation = np.array(
-            _robocasa_gr1_permutation(ROBOCASA_GR1_FLUXVLA_ORDER),
-            dtype=np.int64)
+                "Expected 'native', 'fluxvla', or 'fluxvla_to_n15'.")
+        self.stats_permutation = (
+            np.array(
+                _robocasa_gr1_permutation(ROBOCASA_GR1_FLUXVLA_ORDER),
+                dtype=np.int64)
+            if stats_order in ('fluxvla', 'fluxvla_to_n15') else None)
 
     def __call__(self, data: Dict) -> np.ndarray:
         """Denormalize one predicted action.
@@ -357,6 +360,8 @@ class DenormalizeRobocasaAction:
         return action
 
     def _reorder_action_stats(self, action_stats: Dict) -> Dict:
+        if self.stats_permutation is None:
+            return action_stats
         action_stats = copy.deepcopy(action_stats)
         for key in ('min', 'max', 'mean', 'std', 'q01', 'q99'):
             values = action_stats.get(key)
