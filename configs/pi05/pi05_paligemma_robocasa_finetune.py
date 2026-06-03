@@ -39,7 +39,7 @@ model = dict(
     # --- PaliGemma 主干 LLM (处理图像+语言 token) ---
     llm_backbone=dict(
         type='ConditionGemmaModel',
-        adarms_cond_dim=None,       # 主干 LLM 不使用 ADaRMS
+        adarms_cond_dim=None,  # 主干 LLM 不使用 ADaRMS
         attention_bias=False,
         attention_dropout=0.0,
         bos_token_id=2,
@@ -47,14 +47,14 @@ model = dict(
         head_dim=256,
         hidden_act='gelu_pytorch_tanh',
         hidden_activation='gelu_pytorch_tanh',
-        hidden_size=2048,           # PaliGemma Gemma 隐藏维度
+        hidden_size=2048,  # PaliGemma Gemma 隐藏维度
         initializer_range=0.02,
         intermediate_size=16384,
         max_position_embeddings=8192,
         model_type='gemma',
         num_attention_heads=8,
-        num_hidden_layers=18,       # 18 层 Transformer
-        num_key_value_heads=1,      # GQA (Grouped Query Attention)
+        num_hidden_layers=18,  # 18 层 Transformer
+        num_key_value_heads=1,  # GQA (Grouped Query Attention)
         rms_norm_eps=1e-06,
         rope_theta=10000.0,
         torch_dtype='float32',
@@ -68,15 +68,15 @@ model = dict(
         vision_config=dict(
             attention_dropout=0.0,
             hidden_act='gelu_pytorch_tanh',
-            hidden_size=1152,       # SigLIP 输出维度
-            image_size=224,         # 输入分辨率
+            hidden_size=1152,  # SigLIP 输出维度
+            image_size=224,  # 输入分辨率
             intermediate_size=4304,
             layer_norm_eps=1e-06,
             model_type='siglip_vision_model',
             num_attention_heads=16,
             num_channels=3,
             num_hidden_layers=27,
-            patch_size=14,          # 224/14 = 16x16 = 256 个 patch
+            patch_size=14,  # 224/14 = 16x16 = 256 个 patch
             projection_dim=2048,
             projector_hidden_act='gelu_fast',
             torch_dtype='float32',
@@ -86,49 +86,49 @@ model = dict(
     # --- Vision → LLM 投影层 (1152 → 2048) ---
     projector=dict(
         type='LinearProjector',
-        in_dim=1152,                # SigLIP hidden_size
-        out_dim=2048,               # Gemma hidden_size
+        in_dim=1152,  # SigLIP hidden_size
+        out_dim=2048,  # Gemma hidden_size
     ),
     # --- Flow Matching 动作生成相关 ---
-    proj_width=1024,                # 内部投影维度
-    n_action_steps=16,              # RoboCasa GR1 action horizon (对齐 StarVLA / GR00T)
-                                    # Robocasa 单 episode ~300 步 @20fps
-                                    # chunk=16 即覆盖约 0.8 秒的未来动作
+    proj_width=1024,  # 内部投影维度
+    n_action_steps=16,  # RoboCasa GR1 action horizon (对齐 StarVLA / GR00T)
+    # Robocasa 单 episode ~300 步 @20fps
+    # chunk=16 即覆盖约 0.8 秒的未来动作
     action_in_proj=dict(type='LinearProjector', in_dim=32, out_dim=1024),
     action_out_proj=dict(type='LinearProjector', in_dim=1024, out_dim=32),
     time_mlp_in=dict(type='LinearProjector', in_dim=1024, out_dim=1024),
     time_mlp_out=dict(type='LinearProjector', in_dim=1024, out_dim=1024),
-    max_action_dim=32,              # 模型固定维度，实际 29 维 + 3 维零填充
+    max_action_dim=32,  # 模型固定维度，实际 29 维 + 3 维零填充
     # --- Gemma Expert (处理 action/state 条件) ---
     # 通过 ADaRMS (Adaptive RMSNorm) 将时间步信息注入每层
     llm_expert=dict(
         type='ConditionGemmaModel',
         attention_bias=False,
-        adarms_cond_dim=1024,       # ADaRMS 条件维度 = proj_width
+        adarms_cond_dim=1024,  # ADaRMS 条件维度 = proj_width
         attention_dropout=0.0,
         bos_token_id=2,
         eos_token_id=1,
         head_dim=256,
         hidden_act='gelu_pytorch_tanh',
         hidden_activation='gelu_pytorch_tanh',
-        hidden_size=1024,           # Expert 隐藏维度 (比主干小)
+        hidden_size=1024,  # Expert 隐藏维度 (比主干小)
         initializer_range=0.02,
         intermediate_size=4096,
         max_position_embeddings=8192,
         model_type='gemma',
         num_attention_heads=8,
-        num_hidden_layers=18,       # 与主干层数一致 (layer-wise 对齐)
+        num_hidden_layers=18,  # 与主干层数一致 (layer-wise 对齐)
         num_key_value_heads=1,
         pad_token_id=0,
         rms_norm_eps=1e-06,
         rope_theta=10000.0,
         torch_dtype='float32',
         transformers_version='4.48.1',
-        use_adarms=True,            # 启用 Adaptive RMSNorm
+        use_adarms=True,  # 启用 Adaptive RMSNorm
         use_cache=True,
         vocab_size=257152),
     # --- 训练设置 ---
-    freeze_llm_backbone=False,      # 全参数微调 (不冻结任何模块)
+    freeze_llm_backbone=False,  # 全参数微调 (不冻结任何模块)
     freeze_vision_backbone=False,
     # --- 预训练权重 ---
     # 使用 PI0.5 base 预训练权重 (非 LIBERO 微调权重)
@@ -147,7 +147,8 @@ model = dict(
         'action_in_proj.projector': 'action_in_proj',
         'action_out_proj.projector': 'action_out_proj',
         'llm_backbone.embed_tokens': 'paligemma_with_expert.paligemma.lm_head',
-        'llm_expert.embed_tokens': 'paligemma_with_expert.gemma_expert.lm_head',
+        'llm_expert.embed_tokens':
+        'paligemma_with_expert.gemma_expert.lm_head',
     },
     # --- 需要转 bf16 的模块 (节省显存) ---
     params_to_change_dtype=[
@@ -156,8 +157,35 @@ model = dict(
         'vlm_backbone.vlm.model.vision_tower',
         'vlm_backbone.vlm.model.multi_modal_projector',
     ],
-    ori_action_dim=29,              # Robocasa 实际动作维度 (29 个活跃关节)
+    ori_action_dim=29,  # Robocasa 实际动作维度 (29 个活跃关节)
 )
+
+_ROBOCASA_TASK_DIRS = [
+    'PnPBottleToCabinetClose',
+    'PnPCanToDrawerClose',
+    'PnPCupToDrawerClose',
+    'PnPMilkToMicrowaveClose',
+    'PnPPotatoToMicrowaveClose',
+    'PnPWineToCabinetClose',
+    'PosttrainPnPNovelFromCuttingboardToBasketSplitA',
+    'PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA',
+    'PosttrainPnPNovelFromCuttingboardToPanSplitA',
+    'PosttrainPnPNovelFromCuttingboardToPotSplitA',
+    'PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA',
+    'PosttrainPnPNovelFromPlacematToBasketSplitA',
+    'PosttrainPnPNovelFromPlacematToBowlSplitA',
+    'PosttrainPnPNovelFromPlacematToPlateSplitA',
+    'PosttrainPnPNovelFromPlacematToTieredshelfSplitA',
+    'PosttrainPnPNovelFromPlateToBowlSplitA',
+    'PosttrainPnPNovelFromPlateToCardboardboxSplitA',
+    'PosttrainPnPNovelFromPlateToPanSplitA',
+    'PosttrainPnPNovelFromPlateToPlateSplitA',
+    'PosttrainPnPNovelFromTrayToCardboardboxSplitA',
+    'PosttrainPnPNovelFromTrayToPlateSplitA',
+    'PosttrainPnPNovelFromTrayToPotSplitA',
+    'PosttrainPnPNovelFromTrayToTieredbasketSplitA',
+    'PosttrainPnPNovelFromTrayToTieredshelfSplitA',
+]
 
 # ============================================================
 # 训练数据配置
@@ -170,7 +198,7 @@ model = dict(
 #   - 归一化: min_max (映射到 [-1, 1])
 #   - 24 个任务（6 Seen + 18 Novel）, 每任务约 1000 episodes
 train_dataloader = dict(
-    per_device_batch_size=4,        # 2×A800 80GB, 需实测是否可提到 8
+    per_device_batch_size=4,  # 2×A800 80GB, 需实测是否可提到 8
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -191,30 +219,8 @@ train_dataloader = dict(
             # 转换后的数据路径 (由 convert_robocasa_for_fluxvla.py 生成)
             # 多个任务目录以列表形式传入
             data_root_path=[
-                './datasets/robocasa_fluxvla/PnPBottleToCabinetClose',
-                './datasets/robocasa_fluxvla/PnPCanToDrawerClose',
-                './datasets/robocasa_fluxvla/PnPCupToDrawerClose',
-                './datasets/robocasa_fluxvla/PnPMilkToMicrowaveClose',
-                './datasets/robocasa_fluxvla/PnPPotatoToMicrowaveClose',
-                './datasets/robocasa_fluxvla/PnPWineToCabinetClose',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromCuttingboardToBasketSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromCuttingboardToPanSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromCuttingboardToPotSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlacematToBasketSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlacematToBowlSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlacematToPlateSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlacematToTieredshelfSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlateToBowlSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlateToCardboardboxSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlateToPanSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromPlateToPlateSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromTrayToCardboardboxSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromTrayToPlateSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromTrayToPotSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromTrayToTieredbasketSplitA',
-                './datasets/robocasa_fluxvla/PosttrainPnPNovelFromTrayToTieredshelfSplitA',
+                f'./datasets/robocasa_fluxvla/{task_dir}'
+                for task_dir in _ROBOCASA_TASK_DIRS
             ],
             transforms=[
                 # --- Step 1: 从 Parquet 提取原始数据 ---
@@ -222,12 +228,12 @@ train_dataloader = dict(
                 dict(
                     type='ProcessParquetInputs',
                     parquet_keys=[
-                        'observation.state',    # 29 维关节角度
-                        'timestamp',            # 秒
-                        'actions',              # 29 维目标关节位置
-                        'info',                 # 数据集元信息
-                        'stats',                # 归一化统计量
-                        'action_masks',         # 动作有效性掩码
+                        'observation.state',  # 29 维关节角度
+                        'timestamp',  # 秒
+                        'actions',  # 29 维目标关节位置
+                        'info',  # 数据集元信息
+                        'stats',  # 归一化统计量
+                        'action_masks',  # 动作有效性掩码
                     ],
                     # 视频 key: Robocasa 只有 ego_view 单相机
                     # (LIBERO 有 agentview + wrist 双相机)
@@ -250,16 +256,17 @@ train_dataloader = dict(
                 # action 仍做 min_max，并从 29 维 pad 到 32 维。
                 dict(
                     type='NormalizeStatesAndActions',
-                    action_dim=32,          # 零填充到模型维度
-                    state_dim=64,           # 58D sin/cos state pad 到 64
+                    action_dim=32,  # 零填充到模型维度
+                    state_dim=32,  # 58D sin/cos state pad 到 64
                     state_key='proprio',
                     action_key='action',
                     norm_type='min_max',
                     normalize_states=False),
                 # --- Step 4: 构造 prompt (含 state 信息) ---
-                # 格式: "Task: <task_desc>, State: <discretized_state>;\nAction: "
+                # 格式:
+                # "Task: <task_desc>, State: <discretized_state>;\nAction: "
                 # state 被离散化为 256 bins 嵌入 prompt
-                dict(type='PreparePromptWithState', max_state_dim=64),
+                dict(type='PreparePromptWithState', max_state_dim=32),
                 # --- Step 5: Tokenize prompt ---
                 dict(
                     type='ProcessPrompts',
@@ -273,34 +280,35 @@ train_dataloader = dict(
                 # crop + color jitter 作为 PI0.5 训练消融。
                 dict(type='RandomCropImages', scale=0.95),
                 dict(type='ResizeImages', height=224, width=224),
-                dict(type='ColorJitterImages',
-                     brightness=0.3,
-                     contrast=0.4,
-                     saturation=0.5,
-                     hue=0.08),
+                dict(
+                    type='ColorJitterImages',
+                    brightness=0.3,
+                    contrast=0.4,
+                    saturation=0.5,
+                    hue=0.08),
                 # --- Step 7: 图像归一化 ---
                 # SimpleNormalizeImages: pixel/255.0 (与 ALOHA 一致)
                 dict(type='SimpleNormalizeImages'),
             ],
             # --- 动作窗口配置 ---
-            action_window_size=16,      # 与 n_action_steps 一致
+            action_window_size=16,  # 与 n_action_steps 一致
             action_key='action',
-            use_delta=False,            # Robocasa 使用绝对关节位置，非增量
+            use_delta=False,  # Robocasa 使用绝对关节位置，非增量
             statistic_name='robocasa_gr1_24tasks_v21_n15_sincos_h16',
-            window_start_idx=0,                     
+            window_start_idx=0,
         )))
 
 # ============================================================
 # 训练 Runner 配置
 # ============================================================
 runner = dict(
-    type='FSDPTrainRunner',         # Fully Sharded Data Parallel
-    max_epochs=12,                  # 6 任务 × 1000 episodes ≈ 6000 episodes
-                                    # LIBERO 10 × 38 = 380 episodes, 训练 24 epochs
-                                    # 数据量 ~16 倍，epoch 减半为 12
-    learning_rate=5e-5,             # 与 LIBERO/ALOHA 一致
+    type='FSDPTrainRunner',  # Fully Sharded Data Parallel
+    max_epochs=12,  # 6 任务 × 1000 episodes ≈ 6000 episodes
+    # LIBERO 10 × 38 = 380 episodes, 训练 24 epochs
+    # 数据量 ~16 倍，epoch 减半为 12
+    learning_rate=5e-5,  # 与 LIBERO/ALOHA 一致
     weight_decay=0.01,
-    max_grad_norm=1.0,              # 梯度裁剪
+    max_grad_norm=1.0,  # 梯度裁剪
     # --- 加速路径（对齐 mentor 149ad50 commit） ---
     # no-shard: DDP-风格的参数放置，每卡持有整份权重，关闭 500+ 子模块 FSDP wrap，
     #           配合 bf16 master weights, 达到 LeRobot-level 吞吐。
@@ -309,19 +317,20 @@ runner = dict(
     collator=dict(
         type='DictCollator',
         keys=[
-            'states',               # (B, 64) 58D sin/cos + 零填充后的状态
-            'observation.eepose',   # 可能不存在，DictCollator 会跳过
-            'timestamp',            # (B,) 时间戳
-            'images',               # (B, N_views, C, H, W) 图像
-            'img_masks',            # (B, N_views) 图像有效性掩码
-            'lang_tokens',          # (B, max_len) 分词后的 prompt
-            'lang_masks',           # (B, max_len) 注意力掩码
-            'actions',              # (B, chunk_size, 32) 归一化+零填充后的动作
-            'action_masks',         # (B, chunk_size) 动作有效性掩码
+            'states',  # (B, 64) 58D sin/cos + 零填充后的状态
+            'observation.eepose',  # 可能不存在，DictCollator 会跳过
+            'timestamp',  # (B,) 时间戳
+            'images',  # (B, N_views, C, H, W) 图像
+            'img_masks',  # (B, N_views) 图像有效性掩码
+            'lang_tokens',  # (B, max_len) 分词后的 prompt
+            'lang_masks',  # (B, max_len) 注意力掩码
+            'actions',  # (B, chunk_size, 32) 归一化+零填充后的动作
+            'action_masks',  # (B, chunk_size) 动作有效性掩码
         ],
         meta_keys=['task_description', 'prompt', 'info', 'stats']),
     sampler=None,
-    warmup_ratio=0.03,              # 3% warmup
+    # codespell:ignore-next-line
+    warmup_ratio=0.03,
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path='checkpoints/pi05_base',
@@ -333,7 +342,7 @@ runner = dict(
         grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler_type='linear-warmup+cosine-decay',
-    enable_gradient_checkpointing=True,     # 省显存 (2×A800 开)
+    enable_gradient_checkpointing=True,  # 省显存 (2×A800 开)
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
     change_key_name=False)
@@ -345,70 +354,56 @@ runner = dict(
 #   conda activate fluxvla && cd /root/projects/fluxvla
 #   bash scripts/eval_robocasa.sh \
 #       --config configs/pi05/pi05_paligemma_robocasa_finetune.py \
-#       --ckpt-path work_dirs/pi05_robocasa_full_2n8g_20260421/checkpoints/latest-checkpoint.safetensors
+#       --ckpt-path \
+#       work_dirs/pi05_robocasa_full_2n8g_20260421/checkpoints/latest-checkpoint.safetensors
 #
 # 可选覆盖:
 #   --cfg-options eval.num_trials_per_task=20 eval.seed=42
 #
 # 注意: unnorm_key 必须和训练时的 statistic_name 保持一致
-#      (训练: runner.dataset['statistic_name']='robocasa_gr1_24tasks_v21_n15_sincos_h16')
+#      (训练: runner.dataset['statistic_name'] =
+#       'robocasa_gr1_24tasks_v21_n15_sincos_h16')
 eval = dict(
     type='RobocasaEvalRunner',
     model_family='pi0',
     task_list=[
-        'gr1_unified/PnPBottleToCabinetClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PnPCanToDrawerClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PnPCupToDrawerClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PnPMilkToMicrowaveClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PnPPotatoToMicrowaveClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PnPWineToCabinetClose_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromCuttingboardToBasketSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromCuttingboardToPanSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromCuttingboardToPotSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlacematToBasketSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlacematToBowlSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlacematToPlateSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlacematToTieredshelfSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlateToBowlSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlateToCardboardboxSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlateToPanSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromPlateToPlateSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromTrayToCardboardboxSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromTrayToPlateSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromTrayToPotSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsAndWaistFourierHands_Env',
-        'gr1_unified/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsAndWaistFourierHands_Env',
+        f'gr1_unified/{task_dir}_GR1ArmsAndWaistFourierHands_Env'
+        for task_dir in _ROBOCASA_TASK_DIRS
     ],
-    eval_chunk_size=16,                # 每次取 16 步动作执行
-    max_episode_steps=720,             # 单 episode 最大步数 (与 starVLA 默认一致)
-    num_trials_per_task=20,            # 每任务 20 次，总 24×20=480 episode
+    eval_chunk_size=16,  # 每次取 16 步动作执行
+    max_episode_steps=720,  # 单 episode 最大步数 (与 starVLA 默认一致)
+    num_trials_per_task=20,  # 每任务 20 次，总 24×20=480 episode
     seed=42,
-    unnorm_key='robocasa_gr1_24tasks_v21_n15_sincos_h16',   # ← 必须和训练 statistic_name 一致
+    unnorm_key='robocasa_gr1_24tasks_v21_n15_sincos_h16',
     action_order='n15',
     dataset=dict(
         type='RobocasaEvalDataset',
         unnorm_key='robocasa_gr1_24tasks_v21_n15_sincos_h16',
         transforms=[
-            dict(type='ProcessRobocasaEvalInputs',
-                 img_key='video.ego_view_pad_res256_freq20',
-                 resize_size=224),
+            dict(
+                type='ProcessRobocasaEvalInputs',
+                img_key='video.ego_view_pad_res256_freq20',
+                resize_size=224),
             dict(type='RobocasaGR1N15Bridge'),
-            dict(type='NormalizeStatesAndActions',
-                 state_dim=64,
-                 state_key='proprio', action_key='action',
-                 norm_type='min_max',
-                 normalize_states=False),
-            dict(type='PreparePromptWithState', max_state_dim=64),
-            dict(type='ProcessPrompts', max_len=200,
-                 tokenizer=dict(type='PretrainedTokenizer',
-                                model_path='checkpoints/pi05_base')),
+            dict(
+                type='NormalizeStatesAndActions',
+                state_dim=32,
+                state_key='proprio',
+                action_key='action',
+                norm_type='min_max',
+                normalize_states=False),
+            dict(type='PreparePromptWithState', max_state_dim=32),
+            dict(
+                type='ProcessPrompts',
+                max_len=200,
+                tokenizer=dict(
+                    type='PretrainedTokenizer',
+                    model_path='checkpoints/pi05_base')),
         ]),
     denormalize_action=dict(
         type='DenormalizeRobocasaAction',
         norm_type='min_max',
-        action_dim=29,                 # Robocasa 29 维活跃关节
+        action_dim=29,  # Robocasa 29 维活跃关节
         stats_order='fluxvla',
     ),
 )
