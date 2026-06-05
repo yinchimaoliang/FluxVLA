@@ -199,14 +199,22 @@ class ProcessRobocasaEvalInputs:
                  resize_size: int = 224,
                  center_crop_scale: Optional[float] = None,
                  normalize: bool = True,
+                 value_range: str = 'unit',
                  embodiment_id: Optional[int] = None):
         if center_crop_scale is not None and not (0 < center_crop_scale <= 1):
             raise ValueError(f'center_crop_scale must be in (0, 1], got '
                              f'{center_crop_scale}')
+        if value_range not in ('unit', 'tanh'):
+            raise ValueError(
+                f"value_range must be 'unit' ([0, 1]) or 'tanh' ([-1, 1]), "
+                f'got {value_range}')
         self.img_key = img_key
         self.resize_size = resize_size
         self.center_crop_scale = center_crop_scale
         self.normalize = normalize
+        # 'unit' -> [0, 1]; 'tanh' -> [-1, 1]. Must match the training-time
+        # image normalization (e.g. SimpleNormalizeImages maps to [-1, 1]).
+        self.value_range = value_range
         # Keep the signature aligned with training ProcessParquetInputs.
         self.embodiment_id = embodiment_id
 
@@ -238,8 +246,10 @@ class ProcessRobocasaEvalInputs:
                 img = cv2.resize(img, (self.resize_size, self.resize_size))
 
             if self.normalize:
-                # PI0.5 path: uint8 [0, 255] -> float32 [0, 1].
+                # PI0.5 path: uint8 [0, 255] -> float32 [0, 1] (or [-1, 1]).
                 img = img.astype(np.float32) / 255.0
+                if self.value_range == 'tanh':
+                    img = img * 2.0 - 1.0
                 # HWC -> CHW.
                 img = np.transpose(img, (2, 0, 1))  # (3, 224, 224)
                 # Convert to tensor.

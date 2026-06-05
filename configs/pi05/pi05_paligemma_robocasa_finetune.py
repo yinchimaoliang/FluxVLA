@@ -287,7 +287,7 @@ train_dataloader = dict(
             action_key='action',
             use_delta=False,            # Robocasa 使用绝对关节位置，非增量
             statistic_name='robocasa_gr1_24tasks_v21_n15_sincos_h16',
-            window_start_idx=0,                     
+            window_start_idx=0,
         )))
 
 # ============================================================
@@ -298,9 +298,19 @@ runner = dict(
     max_epochs=12,                  # 6 任务 × 1000 episodes ≈ 6000 episodes
                                     # LIBERO 10 × 38 = 380 episodes, 训练 24 epochs
                                     # 数据量 ~16 倍，epoch 减半为 12
-    learning_rate=5e-5,             # 与 LIBERO/ALOHA 一致
+    # 全参数微调 + 高 LR + 多 epoch 容易过拟合: 训练 loss 一路降到 ~0.007,
+    # 但闭环成功率会随训练变差 (早期 ckpt 反而更好)。降到 2e-5 (与 GR00T
+    # RoboCasa 配置一致) 缓解过拟合; 并务必保存/保留中间 ckpt 以便挑选最优。
+    learning_rate=2e-5,             # was 5e-5; 对齐 GR00T RoboCasa, 抑制过拟合
     weight_decay=0.01,
     max_grad_norm=1.0,              # 梯度裁剪
+    # --- checkpoint 保存策略 ---
+    # 之前未设置, 走默认 max_keep_ckpts=2, 导致早期表现更好的 ckpt 被删除,
+    # 无法回收。这里按 epoch + step 双触发保存, 并多保留几个以便按 eval 选最优。
+    save_epoch_interval=1,
+    save_iter_interval=5000,
+    max_keep_ckpts=8,
+    save_full_model=True,
     # --- 加速路径（对齐 mentor 149ad50 commit） ---
     # no-shard: DDP-风格的参数放置，每卡持有整份权重，关闭 500+ 子模块 FSDP wrap，
     #           配合 bf16 master weights, 达到 LeRobot-level 吞吐。
@@ -391,9 +401,19 @@ eval = dict(
         type='RobocasaEvalDataset',
         unnorm_key='robocasa_gr1_24tasks_v21_n15_sincos_h16',
         transforms=[
+            # 关键: eval 图像预处理必须与训练完全一致, 否则 sim 帧分布与训练
+            # 分布不匹配, 训练 loss 正常但闭环成功率塌到 0。
+            #   - center_crop_scale=0.95 对齐训练 RandomCropImages(scale=0.95)
+            #   - value_range='tanh' 对齐训练 SimpleNormalizeImages -> [-1, 1]
+            #     (默认 normalize 只到 [0, 1], 与训练差一个 ×2-1 的缩放)
+            #   - img_key 需与训练数据相机一致 (与 GR00T RoboCasa 配置同源,
+            #     使用 bg_crop 变体)
             dict(type='ProcessRobocasaEvalInputs',
-                 img_key='video.ego_view_pad_res256_freq20',
-                 resize_size=224),
+                 img_key='video.ego_view_bg_crop_pad_res256_freq20',
+                 resize_size=224,
+                 center_crop_scale=0.95,
+                 normalize=True,
+                 value_range='tanh'),
             dict(type='RobocasaGR1N15Bridge'),
             dict(type='NormalizeStatesAndActions',
                  state_dim=64,
