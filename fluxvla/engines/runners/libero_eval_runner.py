@@ -74,8 +74,9 @@ class LiberoEvalRunner:
             return
 
         for transform in dataset.get('transforms', []):
-            if 'tokenizer' in transform:
-                transform['model_path'] = model_path.as_posix()
+            tokenizer = transform.get('tokenizer')
+            if isinstance(tokenizer, dict):
+                tokenizer['model_path'] = model_path.as_posix()
 
     def __init__(self,
                  cfg: Dict,
@@ -212,8 +213,10 @@ class LiberoEvalRunner:
         num_local_episodes = math.ceil(len(global_episodes) / world_size)
         data_time = time.strftime('%Y_%m_%d-%H_%M_%S')
         run_id = f'EVAL-{self.task_suite_name}-{self.model_family}-{data_time}'  # noqa: E501
+        rank_suffix = str(rank).zfill(2)
         local_log_filepath = os.path.join(
-            Path(self.ckpt_path).resolve().parent.parent, run_id + '.txt')
+            Path(self.ckpt_path).resolve().parent.parent,
+            f'{run_id}-rank{rank_suffix}.txt')
         log_file = open(local_log_filepath, 'w')
         total_episodes, total_successes = torch.zeros(
             1, device=torch.cuda.current_device()), torch.zeros(
