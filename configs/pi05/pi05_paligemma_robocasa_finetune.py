@@ -128,7 +128,7 @@ model = dict(
         use_cache=True,
         vocab_size=257152),
     # --- 训练设置 ---
-    freeze_llm_backbone=False,      # 全参数微调 (不冻结任何模块)
+    freeze_llm_backbone=True,
     freeze_vision_backbone=False,
     # --- 预训练权重 ---
     # 使用 PI0.5 base 预训练权重 (非 LIBERO 微调权重)
@@ -295,14 +295,11 @@ train_dataloader = dict(
 # ============================================================
 runner = dict(
     type='FSDPTrainRunner',         # Fully Sharded Data Parallel
-    max_epochs=12,                  # 6 任务 × 1000 episodes ≈ 6000 episodes
-                                    # LIBERO 10 × 38 = 380 episodes, 训练 24 epochs
-                                    # 数据量 ~16 倍，epoch 减半为 12
-    # 全参数微调 + 高 LR + 多 epoch 容易过拟合: 训练 loss 一路降到 ~0.007,
-    # 但闭环成功率会随训练变差 (早期 ckpt 反而更好)。降到 2e-5 (与 GR00T
-    # RoboCasa 配置一致) 缓解过拟合; 并务必保存/保留中间 ckpt 以便挑选最优。
-    learning_rate=2e-5,             # was 5e-5; 对齐 GR00T RoboCasa, 抑制过拟合
-    weight_decay=0.01,
+    max_epochs=6,
+    # 之前的 full-finetune + 2e-5 + weight_decay=0.01 会持续侵蚀
+    # PI0.5 的预训练表征，评测指标随训练下降。这里改成保守的稳定微调。
+    learning_rate=1e-5,
+    weight_decay=0.0,
     max_grad_norm=1.0,              # 梯度裁剪
     # --- checkpoint 保存策略 ---
     # 之前未设置, 走默认 max_keep_ckpts=2, 导致早期表现更好的 ckpt 被删除,
@@ -331,7 +328,7 @@ runner = dict(
         ],
         meta_keys=['task_description', 'prompt', 'info', 'stats']),
     sampler=None,
-    warmup_ratio=0.03,              # 3% warmup
+    warmup_ratio=0.0,
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path='checkpoints/pi05_base',
@@ -342,7 +339,7 @@ runner = dict(
         run_dir='work_dirs',
         grad_accumulation_steps=1,
         window_size=1),
-    lr_scheduler_type='linear-warmup+cosine-decay',
+    lr_scheduler_type='constant',
     enable_gradient_checkpointing=True,     # 省显存 (2×A800 开)
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
@@ -391,7 +388,7 @@ eval = dict(
         'gr1_unified/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsAndWaistFourierHands_Env',
         'gr1_unified/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsAndWaistFourierHands_Env',
     ],
-    eval_chunk_size=16,                # 每次取 16 步动作执行
+    eval_chunk_size=8,                 # 缩短 open-loop chunk，减少误差累积
     max_episode_steps=720,             # 单 episode 最大步数 (与 starVLA 默认一致)
     num_trials_per_task=20,            # 每任务 20 次，总 24×20=480 episode
     seed=42,
@@ -429,6 +426,7 @@ eval = dict(
         type='DenormalizeRobocasaAction',
         norm_type='min_max',
         action_dim=29,                 # Robocasa 29 维活跃关节
+        clip_actions=True,
         stats_order='fluxvla',
     ),
 )
