@@ -128,7 +128,9 @@ model = dict(
         use_cache=True,
         vocab_size=257152),
     # --- 训练设置 ---
-    freeze_llm_backbone=True,
+    # PI0.5 injects proprio state through discrete prompt tokens, so the
+    # language backbone must adapt to the RoboCasa 64-token state format.
+    freeze_llm_backbone=False,
     freeze_vision_backbone=False,
     # --- 预训练权重 ---
     # 使用 PI0.5 base 预训练权重 (非 LIBERO 微调权重)
@@ -257,9 +259,14 @@ train_dataloader = dict(
                     norm_type='min_max',
                     normalize_states=False),
                 # --- Step 4: 构造 prompt (含 state 信息) ---
-                # 格式: "Task: <task_desc>, State: <discretized_state>;\nAction: "
+                # 格式: "Task: <task_desc>, State: <discretized_state>;\n"
+                # 对齐 OpenPI PI0.5 policy-time tokenization：action 不作为
+                # language postfix，动作由 flow head 生成。
                 # state 被离散化为 256 bins 嵌入 prompt
-                dict(type='PreparePromptWithState', max_state_dim=64),
+                dict(type='PreparePromptWithState',
+                     max_state_dim=64,
+                     lowercase_task_description=True,
+                     add_action_prefix=False),
                 # --- Step 5: Tokenize prompt ---
                 dict(
                     type='ProcessPrompts',
@@ -279,7 +286,7 @@ train_dataloader = dict(
                      saturation=0.5,
                      hue=0.08),
                 # --- Step 7: 图像归一化 ---
-                # SimpleNormalizeImages: pixel/255.0 (与 ALOHA 一致)
+                # SimpleNormalizeImages: pixel/255.0*2-1 (与 OpenPI PI0.5 一致)
                 dict(type='SimpleNormalizeImages'),
             ],
             # --- 动作窗口配置 ---
@@ -295,10 +302,10 @@ train_dataloader = dict(
 # ============================================================
 runner = dict(
     type='FSDPTrainRunner',         # Fully Sharded Data Parallel
-    max_epochs=6,
-    # 之前的 full-finetune + 2e-5 + weight_decay=0.01 会持续侵蚀
-    # PI0.5 的预训练表征，评测指标随训练下降。这里改成保守的稳定微调。
-    learning_rate=1e-5,
+    max_epochs=12,
+    # PI0.5 RoboCasa 需要 full-finetune 语言主干来学习离散 state prompt；
+    # 使用和现有 PI0.5 full-finetune 配置一致的 warmup+cosine recipe。
+    learning_rate=5e-5,
     weight_decay=0.0,
     max_grad_norm=1.0,              # 梯度裁剪
     # --- checkpoint 保存策略 ---
@@ -328,7 +335,7 @@ runner = dict(
         ],
         meta_keys=['task_description', 'prompt', 'info', 'stats']),
     sampler=None,
-    warmup_ratio=0.0,
+    warmup_ratio=0.03,
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_path='checkpoints/pi05_base',
@@ -339,7 +346,7 @@ runner = dict(
         run_dir='work_dirs',
         grad_accumulation_steps=1,
         window_size=1),
-    lr_scheduler_type='constant',
+    lr_scheduler_type='linear-warmup+cosine-decay',
     enable_gradient_checkpointing=True,     # 省显存 (2×A800 开)
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
@@ -388,7 +395,7 @@ eval = dict(
         'gr1_unified/PosttrainPnPNovelFromTrayToTieredbasketSplitA_GR1ArmsAndWaistFourierHands_Env',
         'gr1_unified/PosttrainPnPNovelFromTrayToTieredshelfSplitA_GR1ArmsAndWaistFourierHands_Env',
     ],
-    eval_chunk_size=8,                 # 缩短 open-loop chunk，减少误差累积
+    eval_chunk_size=16,                # 对齐训练 horizon / GR00T RoboCasa
     max_episode_steps=720,             # 单 episode 最大步数 (与 starVLA 默认一致)
     num_trials_per_task=20,            # 每任务 20 次，总 24×20=480 episode
     seed=42,
@@ -417,7 +424,10 @@ eval = dict(
                  state_key='proprio', action_key='action',
                  norm_type='min_max',
                  normalize_states=False),
-            dict(type='PreparePromptWithState', max_state_dim=64),
+            dict(type='PreparePromptWithState',
+                 max_state_dim=64,
+                 lowercase_task_description=True,
+                 add_action_prefix=False),
             dict(type='ProcessPrompts', max_len=200,
                  tokenizer=dict(type='PretrainedTokenizer',
                                 model_path='checkpoints/pi05_base')),
@@ -426,7 +436,7 @@ eval = dict(
         type='DenormalizeRobocasaAction',
         norm_type='min_max',
         action_dim=29,                 # Robocasa 29 维活跃关节
-        clip_actions=True,
+        clip_actions=False,
         stats_order='fluxvla',
     ),
 )
