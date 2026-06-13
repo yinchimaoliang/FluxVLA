@@ -174,6 +174,7 @@ train_dataloader = dict(
                     type='ResizeImagesLanczos',
                     height=224,
                     width=224,
+                    backend='tensorflow',
                 ),
                 dict(
                     type='AugImage',
@@ -186,6 +187,7 @@ train_dataloader = dict(
                     saturation_range=(0.8, 1.2),
                     hue_delta=0.05,
                     share_across_dinosiglip=True,
+                    backend='tensorflow',
                 ),
                 dict(
                     type='NormalizeImages',
@@ -246,7 +248,9 @@ eval = dict(
                 type='ProcessLiberoEvalInputs',
                 img_keys=['agentview_image', 'agentview_image'],
                 center_crop=True,
-                resize_size=224),
+                resize_size=224,
+                resize_backend='tensorflow',
+                jpeg_roundtrip=True),
             dict(
                 type='TransformImage',
                 image_resize_strategy='resize-naive',

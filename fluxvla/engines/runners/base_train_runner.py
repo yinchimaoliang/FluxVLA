@@ -864,7 +864,14 @@ class BaseTrainRunner(ABC):
             output: CausalLMOutputWithPast = self.vla(**batch)
             loss = output['loss']
 
-        self.metric.commit(loss=loss)
+        metric_payload = {'loss': loss}
+        if ('action_accuracy' in output
+                and output['action_accuracy'] is not None):
+            metric_payload['action_accuracy'] = output['action_accuracy']
+        if ('action_l1_loss' in output
+                and output['action_l1_loss'] is not None):
+            metric_payload['l1_loss'] = output['action_l1_loss']
+        self.metric.commit(**metric_payload)
         loss.backward()
 
         # Commit per-dataset metrics
