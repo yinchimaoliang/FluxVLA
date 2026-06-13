@@ -104,6 +104,7 @@ train_dataloader = dict(
                         0.0867857113480568,
                         1.0,
                     ],
+                    mask=[True, True, True, True, True, True, False],
                 ), ), ),
         datasets=dict(
             type='ParquetDataset',
