@@ -25,6 +25,7 @@ import_heterogeneous_runtime_symbols(
         'qwen2_5_vl': ['QWen2_5VL'],
         'smolvlm': ['SmolVLMBackbone'],
         'qwen3_vl': ['Qwen3VL'],
+        'groot_n17_qwen3_backbone': ['GrootN17Qwen3Backbone'],
         'wan_backbone': ['WanBaseBackbone'],
         'wan21_backbone': ['Wan21Backbone'],
         'wan22_backbone': ['Wan22Backbone'],
