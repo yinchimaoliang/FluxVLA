@@ -12,6 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Dataset contract: agilex_aloha_unified@4.0.0 / dataset 2.0.0.
+# Parquet stores only unified_107d robot vectors plus per-dimension masks;
+# qpose/eepose are losslessly decoded at runtime to avoid duplicate columns.
+# GR00T-N1.5 retains its pretrained 64D state / 32D action envelopes and uses
+# packed ALOHA qpose[14] for proprioception and robot commands.
+#
+# This converted example has no issued target or calibrated ego2cam. Its
+# target.unified_107d_mask is false, so every unavailable placeholder target
+# is masked out of the loss. A new dataset version with real targets is
+# required before effective action fine-tuning.
+
+ALOHA_QPOSE_INDICES = [0, 1, 2, 3, 4, 5, 28, 7, 8, 9, 10, 11, 12, 29]
+ALOHA_EEPOSE_INDICES = list(range(14, 28))
+
 model = dict(
     type='LlavaVLA',
     pretrained_name_or_path=  # noqa: E251
@@ -73,23 +87,33 @@ train_dataloader = dict(
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
-        name_mappings={'observation.state': ['proprio', 'action']},
-        statistic_keys=[
-            'observation.state', 'observation.eepose', 'timestamp'
-        ],
+        name_mappings={
+            'observation.unified_107d': ['proprio'],
+            'target.unified_107d': ['action']
+        },
+        statistic_keys=['observation.unified_107d', 'target.unified_107d'],
+        statistic_indices={
+            'observation.unified_107d': ALOHA_QPOSE_INDICES,
+            'target.unified_107d': ALOHA_QPOSE_INDICES,
+        },
         datasets=[
             dict(
                 type='ParquetDataset',
                 data_root_path=  # noqa: E251
                 [
-                    './datasets/RealRobot_AgileX_aloha_lerobot_v2/aloha_example',  # noqa: E501
+                    './datasets/RealRobot_AgileX_aloha_lerobot/example_canonical_107d_v3_1',  # noqa: E501
                 ],
+                expected_dataset_version='2.0.0',
+                expected_schema_id='agilex_aloha_unified',
+                expected_schema_version='4.0.0',
                 transforms=[
                     dict(
                         type='ProcessParquetInputs',
                         embodiment_id=0,
                         parquet_keys=[
-                            'observation.state', 'observation.eepose',
+                            'observation.unified_107d',
+                            'observation.unified_107d_mask',
+                            'observation.ego2cam', 'observation.ego2cam_valid',
                             'timestamp', 'actions', 'info', 'stats',
                             'action_masks'
                         ],
@@ -97,8 +121,11 @@ train_dataloader = dict(
                             'observation.images.cam_high',
                             'observation.images.cam_left_wrist',
                             'observation.images.cam_right_wrist'
-                        ],
-                        name_mappings={'observation.state': ['states']}),
+                        ]),
+                    dict(
+                        type='DecodeAlohaUnified107D',
+                        qpose_indices=ALOHA_QPOSE_INDICES,
+                        eepose_indices=ALOHA_EEPOSE_INDICES),
                     dict(type='ParquetPrompter'),
                     dict(
                         type='ProcessPromptsWithImage',
@@ -128,6 +155,10 @@ train_dataloader = dict(
                         action_key='action',
                         norm_type='mean_std')
                 ],
+                action_key='target.unified_107d',
+                action_mask_key='target.unified_107d_mask',
+                action_indices=ALOHA_QPOSE_INDICES,
+                window_start_idx=0,
                 action_window_size=32)
         ]))
 
@@ -146,7 +177,8 @@ runner = dict(
     collator=dict(
         type='DictCollator',
         keys=[
-            'states', 'observation.eepose', 'timestamp', 'images', 'img_masks',
+            'states', 'observation.eepose', 'observation.ego2cam',
+            'observation.ego2cam_valid', 'timestamp', 'images', 'img_masks',
             'lang_tokens', 'lang_masks', 'actions', 'action_masks',
             'embodiment_ids'
         ],
@@ -167,16 +199,21 @@ inference = dict(
     type='AlohaInferenceRunner',
     seed=7,
     task_descriptions={
-        '1': 'pick up the brown bird toy with left arm',
-        '2': 'pick up the brown bird toy with right arm',
-        '3': 'pick up the pruple knitted teddy bear toy with left arm',
-        '4': 'pick up the purple knitted teddy bear toy with right arm',
-        '5': 'pick up the white racing car toy with left arm',
-        '6': 'pick up the white racing car toy with right arm',
-        '7': 'pick up the pruple caterpillar toy with left arm',
-        '8': 'pick up the pruple caterpillar toy with right arm',
-        '9': 'place it in the brown flat cardboard box with left arm',
-        '10': 'place it in the brown flat cardboard box with right arm',
+        '1': 'pick up the green bowl with right arm',
+        '2': 'place it on the green bowl with left arm',
+        '3': 'pick up the green bowl with left arm',
+        '4': 'pick up the blue bowl with right arm',
+        '5': 'place it on the red plate with left arm',
+        '6': 'pick up the golden chocolate ball with right arm',
+        '7': 'pick up the tiger toy with right arm',
+        '8': 'pick up the robot dog toy with right arm',
+        '9': 'pick up the shuttlecock with right arm',
+        '10': 'pick up the yellow bowl with right arm',
+        '11': 'pick up the giraffe toy with right arm',
+        '12': 'place it in the paper bag with right arm',
+        '13': 'place it on the blue bowl with left arm',
+        '14': 'hold open the brown paper bag with left arm',
+        '15': 'pick up the blue bowl with left arm',
     },
     mixed_precision_dtype='bf16',
     dataset=dict(

@@ -56,6 +56,9 @@ class DistributedRepeatingDataset(IterableDataset):
         dim (int, optional): Target dimension for padding/copying data.
             If provided, data will be padded/copied to be an integer
             multiple of this dimension. Defaults to None.
+        statistic_indices (dict[str, list[int]], optional): Ordered source
+            dimensions selected before statistics are aggregated and renamed.
+            This supports runtime views decoded from a stored unified vector.
         statistics_overrides (dict, optional): Nested statistic values to
             override after collecting dataset statistics.
     """
@@ -69,6 +72,7 @@ class DistributedRepeatingDataset(IterableDataset):
                  seed: int = 42,
                  statistic_name: str = 'private',
                  dim: Optional[int] = None,
+                 statistic_indices: Optional[Dict[str, List[int]]] = None,
                  dataset_statistics: Optional[Dict] = None,
                  statistics_overrides: Optional[Dict] = None,
                  dataset_statistics_path: Optional[str] = None) -> None:
@@ -85,6 +89,7 @@ class DistributedRepeatingDataset(IterableDataset):
         self.seed = seed
         self.statistic_name = statistic_name
         self.dim = dim
+        self.statistic_indices = statistic_indices
         # Determine the dataset format and initialize accordingly
         if isinstance(datasets, dict) and not (isinstance(
                 list(datasets.values())[0], list) if datasets else False):
@@ -105,7 +110,7 @@ class DistributedRepeatingDataset(IterableDataset):
 
             if dataset_statistics is None:
                 self.dataset_statistics = self.get_dataset_statistics(
-                    stats, statistic_keys, name_mappings)
+                    stats, statistic_keys, name_mappings, statistic_indices)
             else:
                 self.dataset_statistics = dataset_statistics
 
@@ -140,7 +145,7 @@ class DistributedRepeatingDataset(IterableDataset):
 
             if dataset_statistics is None:
                 self.dataset_statistics = self.get_dataset_statistics(
-                    stats, statistic_keys, name_mappings)
+                    stats, statistic_keys, name_mappings, statistic_indices)
             else:
                 self.dataset_statistics = dataset_statistics
 
@@ -190,7 +195,8 @@ class DistributedRepeatingDataset(IterableDataset):
                 # Calculate statistics for this group
                 self.grouped_dataset_statistics[
                     group_name] = self.get_dataset_statistics(
-                        group_stats, statistic_keys, name_mappings)
+                        group_stats, statistic_keys, name_mappings,
+                        statistic_indices)
 
             # Calculate total length across all groups
             self.total_len = sum(group_cumulative_lens[-1]
@@ -275,10 +281,12 @@ class DistributedRepeatingDataset(IterableDataset):
             return self.dataset.__getitem__(global_idx,
                                             self.dataset_statistics)
 
-    def get_dataset_statistics(self,
-                               stats,
-                               static_keys: List[str],
-                               name_mappings: Optional[Dict] = None) -> Dict:
+    def get_dataset_statistics(
+            self,
+            stats,
+            static_keys: List[str],
+            name_mappings: Optional[Dict] = None,
+            statistic_indices: Optional[Dict[str, List[int]]] = None) -> Dict:
         """Collect and combine statistics from multiple datasets.
 
         Args:
@@ -286,6 +294,8 @@ class DistributedRepeatingDataset(IterableDataset):
             static_keys (list[str]): Keys for which to collect statistics.
             name_mappings (dict, optional): Mappings for statistic names.
                 Defaults to None.
+            statistic_indices (dict[str, list[int]], optional): Ordered
+                dimensions selected from each named statistic source.
         Returns:
             dict: Combined statistics for the specified keys.
         """
@@ -298,6 +308,25 @@ class DistributedRepeatingDataset(IterableDataset):
                     raise KeyError(f"Missing dataset statistic key: '{key}'.")
 
                 stat_data = stat['stats'][key]
+                if statistic_indices and key in statistic_indices:
+                    indices = np.asarray(
+                        statistic_indices[key], dtype=np.int64)
+                    source_dim = len(stat_data['mean'])
+                    if (indices.ndim != 1 or indices.size == 0
+                            or np.any(indices < 0)
+                            or np.any(indices >= source_dim)):
+                        raise ValueError(
+                            f'Invalid statistic_indices for {key!r}: '
+                            f'{indices.tolist()} with source dim {source_dim}.'
+                        )
+                    selected_stat_data = {}
+                    for name, value in stat_data.items():
+                        values = np.asarray(value)
+                        if values.ndim == 1 and values.shape[0] == source_dim:
+                            selected_stat_data[name] = values[indices].tolist()
+                        else:
+                            selected_stat_data[name] = value
+                    stat_data = selected_stat_data
 
                 # Collect basic statistics
                 dataset_statistics[key]['min'].append(stat_data['min'])
@@ -353,15 +382,22 @@ class DistributedRepeatingDataset(IterableDataset):
                             padded_stats.append(padded_stat)
                         key_stats[stat_type] = padded_stats
 
-            # Global min and max
-            global_min = np.asarray(
-                key_stats['min'], dtype=np.float64).min(axis=0).tolist()
-            global_max = np.asarray(
-                key_stats['max'], dtype=np.float64).max(axis=0).tolist()
-
             means = np.asarray(key_stats['mean'], dtype=np.float64)
             stds = np.asarray(key_stats['std'], dtype=np.float64)
             counts = self._counts_to_weights(key_stats, means, key)
+
+            min_values = np.asarray(key_stats['min'], dtype=np.float64)
+            max_values = np.asarray(key_stats['max'], dtype=np.float64)
+            if counts is None:
+                global_min = min_values.min(axis=0).tolist()
+                global_max = max_values.max(axis=0).tolist()
+            else:
+                valid_counts = self._broadcast_weights_for_values(
+                    counts, min_values) > 0
+                global_min = np.where(valid_counts, min_values,
+                                      np.inf).min(axis=0).tolist()
+                global_max = np.where(valid_counts, max_values,
+                                      -np.inf).max(axis=0).tolist()
 
             weighted_mean, combined_std = self._combine_mean_and_std(
                 means, stds, counts)

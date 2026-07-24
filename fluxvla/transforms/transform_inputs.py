@@ -15,7 +15,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 import av
 import numpy as np
@@ -307,6 +307,95 @@ class ProcessParquetInputs():
         for i, frame in enumerate(container.decode(video=0)):
             if i == frame_idx:
                 return frame.to_ndarray(format='rgb24')
+
+
+@TRANSFORMS.register_module()
+class DecodeAlohaUnified107D:
+    """Decode model views from the versioned ALOHA unified 107D vector.
+
+    The Parquet representation remains non-redundant. This transform creates
+    the configured qpose and eepose views required by GR00T at runtime and
+    verifies that every required observation dimension is marked valid.
+    """
+
+    def __init__(self,
+                 observation_key: str = 'observation.unified_107d',
+                 observation_mask_key: str = 'observation.unified_107d_mask',
+                 expected_schema_id: str = 'agilex_aloha_unified',
+                 expected_layout_id: str = 'lingbot_vla2_dexhand32x2_107_v1',
+                 qpose_indices: Sequence[int] = (0, 1, 2, 3, 4, 5, 28, 7, 8, 9,
+                                                 10, 11, 12, 29),
+                 eepose_indices: Sequence[int] = tuple(range(14, 28))):
+        self.observation_key = observation_key
+        self.observation_mask_key = observation_mask_key
+        self.expected_schema_id = expected_schema_id
+        self.expected_layout_id = expected_layout_id
+        self.qpose_indices = self._validate_indices(qpose_indices,
+                                                    'qpose_indices')
+        self.eepose_indices = self._validate_indices(eepose_indices,
+                                                     'eepose_indices')
+
+    @staticmethod
+    def _validate_indices(indices: Sequence[int], name: str) -> np.ndarray:
+        indices = np.asarray(indices)
+        if indices.ndim != 1 or indices.size == 0:
+            raise ValueError(f'{name} must be a non-empty 1D sequence.')
+        if not np.issubdtype(indices.dtype, np.integer):
+            raise ValueError(f'{name} must contain only integers.')
+        indices = indices.astype(np.int64, copy=True)
+        if (indices < 0).any() or (indices >= 107).any():
+            raise ValueError(f'{name} must contain indices in [0, 107).')
+        if np.unique(indices).size != indices.size:
+            raise ValueError(f'{name} must not contain duplicate indices.')
+        return indices
+
+    def __call__(self, inputs):
+        info = inputs.get('info')
+        if not isinstance(info, dict):
+            raise ValueError('DecodeAlohaUnified107D requires dataset info.')
+        if info.get('schema_id') != self.expected_schema_id:
+            raise ValueError(
+                f'Unexpected unified schema: {info.get("schema_id")!r}.')
+        layout = info.get('unified_layout', {})
+        if (layout.get('layout_id') != self.expected_layout_id
+                or layout.get('dimension') != 107):
+            raise ValueError('Unexpected ALOHA unified 107D layout.')
+
+        unified = np.asarray(inputs[self.observation_key], dtype=np.float32)
+        unified_mask = np.asarray(
+            inputs[self.observation_mask_key], dtype=np.bool_)
+        if unified.shape != (107, ) or unified_mask.shape != (107, ):
+            raise ValueError(
+                'ALOHA unified observation and mask must both have shape '
+                '(107,).')
+
+        qpose_mask = unified_mask[self.qpose_indices]
+        eepose_mask = unified_mask[self.eepose_indices]
+        if not qpose_mask.all() or not eepose_mask.all():
+            raise ValueError(
+                'Required ALOHA qpose/eepose dimensions are invalid.')
+
+        inputs['states'] = unified[self.qpose_indices]
+        inputs['observation.eepose'] = unified[self.eepose_indices]
+        inputs.pop(self.observation_key)
+        inputs.pop(self.observation_mask_key)
+
+        if 'actions' in inputs:
+            actions = np.asarray(inputs['actions'], dtype=np.float32)
+            if actions.ndim != 2 or actions.shape[-1] != len(
+                    self.qpose_indices):
+                raise ValueError('Projected ALOHA actions must have shape '
+                                 f'[horizon, {len(self.qpose_indices)}].')
+            inputs['actions'] = actions
+        if 'action_masks' in inputs:
+            action_masks = np.asarray(inputs['action_masks'], dtype=np.float32)
+            if action_masks.ndim != 2 or action_masks.shape[-1] != len(
+                    self.qpose_indices):
+                raise ValueError(
+                    'Projected ALOHA action masks must have shape '
+                    f'[horizon, {len(self.qpose_indices)}].')
+            inputs['action_masks'] = action_masks
+        return inputs
 
 
 @TRANSFORMS.register_module()

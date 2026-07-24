@@ -36,6 +36,9 @@ class ParquetDataset(Dataset):
                  transforms: List[Dict],
                  action_window_size: int = 9,
                  action_key: str = 'observation.state',
+                 action_valid_key: Optional[str] = None,
+                 action_mask_key: Optional[str] = None,
+                 action_indices: Optional[List[int]] = None,
                  use_delta: bool = False,
                  statistic_name: str = 'private',
                  window_start_idx: int = 1,
@@ -44,7 +47,9 @@ class ParquetDataset(Dataset):
                  train_episode_fraction: float = 1.0,
                  repeat_to_full_length: bool = False,
                  expose_index: bool = False,
-                 expected_dataset_version: Optional[str] = None) -> None:
+                 expected_dataset_version: Optional[str] = None,
+                 expected_schema_id: Optional[str] = None,
+                 expected_schema_version: Optional[str] = None) -> None:
         """Initialize the Parquet dataset.
 
         Args:
@@ -65,6 +70,20 @@ class ParquetDataset(Dataset):
                 video processing.
                 Defaults to None.
             action_key (str): Key for the action data.
+            action_valid_key (str, optional): Per-frame boolean key declaring
+                whether the action value is genuine supervision. Invalid
+                actions remain in the returned tensor as placeholders but
+                receive a zero entry in ``action_masks``. Defaults to None,
+                which treats every temporally valid action as supervised.
+            action_mask_key (str, optional): Per-frame vector key declaring
+                which action dimensions are genuine supervision. When set,
+                ``action_masks`` has shape ``[horizon, action_dim]`` and is
+                combined with temporal and optional scalar validity. This is
+                useful for unified cross-embodiment action vectors. Defaults
+                to None.
+            action_indices (list[int], optional): Ordered dimensions selected
+                from both ``action_key`` and ``action_mask_key`` before action
+                windows are returned. Defaults to None (all dimensions).
             use_delta (bool): Whether to use delta actions.
                 Defaults to False.
             statistic_name (str): Name for the statistics collection.
@@ -92,6 +111,10 @@ class ParquetDataset(Dataset):
             expected_dataset_version (str, optional): Expected FluxVLA dataset
                 content version. If omitted, no version check is performed so
                 existing local datasets remain usable.
+            expected_schema_id (str, optional): Expected data-rule schema id
+                from ``meta/info.json``.
+            expected_schema_version (str, optional): Expected data-rule schema
+                version from ``meta/info.json``.
         """
         super().__init__()
         if not 0 < train_episode_fraction <= 1:
@@ -115,7 +138,13 @@ class ParquetDataset(Dataset):
             assert os.path.exists(info_path), \
                 f'Metadata file not found at {info_path}'
             with open(os.path.join(root, 'info.json'), 'rb') as f:
-                info_list.append(json.load(f))
+                dataset_info = json.load(f)
+            info_list.append(dataset_info)
+            self._verify_schema_contract(
+                dataset_root=dataset_root,
+                dataset_info=dataset_info,
+                expected_schema_id=expected_schema_id,
+                expected_schema_version=expected_schema_version)
             if expected_dataset_version is not None:
                 self._verify_dataset_version(
                     dataset_root=dataset_root,
@@ -165,6 +194,17 @@ class ParquetDataset(Dataset):
             if repeat_to_full_length else len(self.sample_indices))
         self.transforms = list()
         self.action_key = action_key
+        self.action_valid_key = action_valid_key
+        self.action_mask_key = action_mask_key
+        self.action_indices = (None if action_indices is None else np.asarray(
+            action_indices, dtype=np.int64))
+        if self.action_indices is not None:
+            if (self.action_indices.ndim != 1 or self.action_indices.size == 0
+                    or np.any(self.action_indices < 0) or np.unique(
+                        self.action_indices).size != self.action_indices.size):
+                raise ValueError(
+                    'action_indices must be a non-empty list of unique, '
+                    'non-negative integers.')
         self.use_delta = use_delta
         self.statistic_name = statistic_name
         self.window_start_idx = window_start_idx
@@ -205,6 +245,25 @@ class ParquetDataset(Dataset):
                 f'  --revision {shlex.quote(cls.HF_REVISION)} \\\n'
                 f'  --include {shlex.quote(remote_dir + "/*")} \\\n'
                 f'  --local-dir {shlex.quote(local_dir)}')
+
+    @staticmethod
+    def _verify_schema_contract(
+            dataset_root: str, dataset_info: Dict[str, Any],
+            expected_schema_id: Optional[str],
+            expected_schema_version: Optional[str]) -> None:
+        actual_id = dataset_info.get('schema_id')
+        actual_version = dataset_info.get('schema_version')
+        if expected_schema_id is not None and actual_id != expected_schema_id:
+            raise RuntimeError(
+                f'Dataset schema id mismatch for {dataset_root}. Expected '
+                f'{expected_schema_id}, but found {actual_id or "missing"} in '
+                'meta/info.json.')
+        if (expected_schema_version is not None
+                and actual_version != expected_schema_version):
+            raise RuntimeError(
+                f'Dataset schema version mismatch for {dataset_root}. '
+                f'Expected {expected_schema_version}, but found '
+                f'{actual_version or "missing"} in meta/info.json.')
 
     def _verify_dataset_version(self, dataset_root: str,
                                 expected_dataset_version: str) -> None:
@@ -313,6 +372,34 @@ class ParquetDataset(Dataset):
             dataset_idx = self._get_dataset_index(index)
         actions = list()
         action_masks = list()
+
+        def select_action_dimensions(value, key):
+            values = np.asarray(value)
+            if self.action_indices is None:
+                return values
+            if values.ndim != 1 or self.action_indices.max(
+            ) >= values.shape[0]:
+                raise ValueError(
+                    f'Cannot select action_indices from {key!r} with shape '
+                    f'{values.shape}.')
+            return values[self.action_indices]
+
+        action_template_full = np.asarray(data[self.action_key])
+        if self.action_mask_key is not None:
+            mask_template_full = np.asarray(
+                data[self.action_mask_key], dtype=np.float32)
+            if mask_template_full.shape != action_template_full.shape:
+                raise ValueError(
+                    f'Action mask {self.action_mask_key!r} has shape '
+                    f'{mask_template_full.shape}, expected '
+                    f'{action_template_full.shape} '
+                    f'to match {self.action_key!r}.')
+            mask_template = select_action_dimensions(mask_template_full,
+                                                     self.action_mask_key)
+            invalid_action_mask = np.zeros_like(
+                mask_template, dtype=np.float32)
+        else:
+            invalid_action_mask = 0
         window_idx = self.window_start_idx
         while len(actions) < self.action_window_size:
             action_index = index + window_idx
@@ -322,18 +409,42 @@ class ParquetDataset(Dataset):
                 self._get_task_name(dataset_idx, action_index)
                 if valid_window_index else None)
             if valid_window_index and action_task not in ('empty', 'static'):
+                current_action = select_action_dimensions(
+                    self.dataset[action_index][self.action_key],
+                    self.action_key)
                 if self.use_delta:
-                    actions.append((
-                        np.array(self.dataset[action_index][self.action_key]) -
-                        np.array(self.dataset[action_index -
-                                              1][self.action_key])).tolist())
+                    previous_action = select_action_dimensions(
+                        self.dataset[action_index - 1][self.action_key],
+                        self.action_key)
+                    actions.append(current_action - previous_action)
                 else:
-                    actions.append(self.dataset[action_index][self.action_key])
-                action_masks.append(1)
+                    actions.append(current_action)
+                scalar_valid = (
+                    self.action_valid_key is None
+                    or bool(self.dataset[action_index][self.action_valid_key]))
+                if self.action_mask_key is None:
+                    action_masks.append(int(scalar_valid))
+                else:
+                    dimension_mask = np.asarray(
+                        self.dataset[action_index][self.action_mask_key],
+                        dtype=np.float32)
+                    dimension_mask = select_action_dimensions(
+                        dimension_mask, self.action_mask_key)
+                    if self.use_delta and action_index > 0:
+                        previous_mask = np.asarray(
+                            self.dataset[action_index -
+                                         1][self.action_mask_key],
+                            dtype=np.float32)
+                        previous_mask = select_action_dimensions(
+                            previous_mask, self.action_mask_key)
+                        dimension_mask = dimension_mask * previous_mask
+                    if not scalar_valid:
+                        dimension_mask = np.zeros_like(dimension_mask)
+                    action_masks.append(dimension_mask)
             elif action_task == 'empty':
                 for _ in range(self.action_window_size - len(actions)):
                     actions.append(actions[-1])
-                    action_masks.append(0)
+                    action_masks.append(invalid_action_mask)
                 break
             elif action_task == 'static':
                 window_idx += 1
@@ -342,8 +453,10 @@ class ParquetDataset(Dataset):
                 if len(actions) > 0:
                     actions.append(actions[-1])
                 else:
-                    actions.append(data[self.action_key])
-                action_masks.append(0)
+                    actions.append(
+                        select_action_dimensions(data[self.action_key],
+                                                 self.action_key))
+                action_masks.append(invalid_action_mask)
             window_idx += 1
         # Collect forward-looking frame timestamps for video models
         if self.frame_window_size > 1:
