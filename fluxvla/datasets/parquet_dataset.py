@@ -49,7 +49,9 @@ class ParquetDataset(Dataset):
                  expose_index: bool = False,
                  expected_dataset_version: Optional[str] = None,
                  expected_schema_id: Optional[str] = None,
-                 expected_schema_version: Optional[str] = None) -> None:
+                 expected_schema_version: Optional[str] = None,
+                 expose_subtask_metadata: bool = False,
+                 enforce_action_subtask_consistency: bool = False) -> None:
         """Initialize the Parquet dataset.
 
         Args:
@@ -115,6 +117,14 @@ class ParquetDataset(Dataset):
                 from ``meta/info.json``.
             expected_schema_version (str, optional): Expected data-rule schema
                 version from ``meta/info.json``.
+            expose_subtask_metadata (bool): Whether to expose the current
+                subtask definition to transforms. The temporary metadata key
+                is intended for ``LoadSubtask`` and is not a Parquet column.
+                Defaults to False.
+            enforce_action_subtask_consistency (bool): Stop and invalidate the
+                remainder of an action window when its frame-level
+                ``subtask_index`` changes. Defaults to False for compatibility
+                with legacy configs.
         """
         super().__init__()
         if not 0 < train_episode_fraction <= 1:
@@ -130,7 +140,12 @@ class ParquetDataset(Dataset):
         # Merge multiple meta_root
         all_stats = []
         all_tasks = []
+        all_subtasks = []
         all_episodes = []
+        task_definitions_by_dataset = []
+        subtask_definitions_by_dataset = []
+        episode_metadata_by_dataset = []
+        separate_subtasks_by_dataset = []
         info_list = []
 
         for dataset_root, root in zip(data_root_path, meta_root):
@@ -163,23 +178,94 @@ class ParquetDataset(Dataset):
             assert os.path.exists(tasks_path), \
                 f'Tasks file not found at {tasks_path}'
             with open(tasks_path, 'r', encoding='utf-8') as f:
-                all_tasks.append([json.loads(line) for line in f])
+                task_records = [json.loads(line) for line in f]
+            all_tasks.append(task_records)
+            task_definitions = {
+                int(record.get('task_index', task_index)): record
+                for task_index, record in enumerate(task_records)
+            }
+            if len(task_definitions) != len(task_records):
+                raise ValueError(f'Duplicate task_index in {tasks_path}.')
+            task_definitions_by_dataset.append(task_definitions)
+
+            subtasks_path = os.path.join(root, 'subtasks.jsonl')
+            declares_separate_subtasks = ('subtask_index'
+                                          in dataset_info.get('features', {}))
+            has_subtasks_file = os.path.exists(subtasks_path)
+            if declares_separate_subtasks != has_subtasks_file:
+                raise ValueError(
+                    f'Inconsistent subtask schema in {dataset_root!r}: '
+                    f'info.features declares subtask_index='
+                    f'{declares_separate_subtasks}, but '
+                    f'meta/subtasks.jsonl exists={has_subtasks_file}.')
+            has_separate_subtasks = declares_separate_subtasks
+            if has_separate_subtasks:
+                with open(subtasks_path, 'r', encoding='utf-8') as f:
+                    subtask_records = [json.loads(line) for line in f]
+                subtask_definitions = {
+                    int(record.get('subtask_index', subtask_index)): record
+                    for subtask_index, record in enumerate(subtask_records)
+                }
+                if len(subtask_definitions) != len(subtask_records):
+                    raise ValueError(
+                        f'Duplicate subtask_index in {subtasks_path}.')
+            else:
+                # Legacy datasets used tasks.jsonl and per-frame task_index
+                # for what is now the subtask namespace.
+                subtask_records = task_records
+                subtask_definitions = {
+                    int(record.get('task_index', subtask_index)): record
+                    for subtask_index, record in enumerate(subtask_records)
+                }
+            all_subtasks.append(subtask_records)
+            subtask_definitions_by_dataset.append(subtask_definitions)
+            separate_subtasks_by_dataset.append(has_separate_subtasks)
 
             episodes_path = os.path.join(root, 'episodes.jsonl')
             assert os.path.exists(episodes_path), \
                 f'Episodes file not found at {episodes_path}'
             with open(episodes_path, 'r', encoding='utf-8') as f:
-                all_episodes.extend([json.loads(line) for line in f])
+                episode_records = [json.loads(line) for line in f]
+            all_episodes.extend(episode_records)
+            episode_metadata = {
+                int(record.get('episode_index', episode_index)): record
+                for episode_index, record in enumerate(episode_records)
+            }
+            if len(episode_metadata) != len(episode_records):
+                raise ValueError(
+                    f'Duplicate episode_index in {episodes_path}.')
+            episode_metadata_by_dataset.append(episode_metadata)
 
         self.info = info_list
         self.stats = all_stats
         self.tasks = all_tasks
+        self.subtasks = all_subtasks
         self.episodes = all_episodes
+        self.task_definitions_by_dataset = task_definitions_by_dataset
+        self.subtask_definitions_by_dataset = \
+            subtask_definitions_by_dataset
+        self.episode_metadata_by_dataset = episode_metadata_by_dataset
+        self.separate_subtasks_by_dataset = separate_subtasks_by_dataset
+        self.expose_subtask_metadata = expose_subtask_metadata
+        self.enforce_action_subtask_consistency = \
+            enforce_action_subtask_consistency
         # Summarize all data_root
         datasets = []
         dataset_sizes = []  # Record the size of each dataset
-        for root in data_root:
+        for dataset_idx, root in enumerate(data_root):
             hf_dataset = load_dataset('parquet', data_dir=root, split='train')
+            row_index_key = ('subtask_index'
+                             if separate_subtasks_by_dataset[dataset_idx] else
+                             'task_index')
+            if row_index_key not in hf_dataset.column_names:
+                raise ValueError(
+                    f'Parquet data in {root!r} has no {row_index_key!r} '
+                    'declared by its metadata schema.')
+            if (separate_subtasks_by_dataset[dataset_idx]
+                    and 'task_index' in hf_dataset.column_names):
+                raise ValueError(
+                    f'Parquet data in {root!r} redundantly stores task_index; '
+                    'episode-level task_index belongs in episodes.jsonl.')
             dataset_sizes.append(len(hf_dataset))
             datasets.append(hf_dataset)
         hf_dataset = concatenate_datasets(datasets)
@@ -334,15 +420,69 @@ class ParquetDataset(Dataset):
             self.dataset_cumulative_sizes, index, side='right') - 1
         return dataset_idx
 
+    def _get_episode_metadata(self, dataset_idx: int,
+                              index: int) -> Dict[str, Any]:
+        episode_index = int(self.dataset[index]['episode_index'])
+        try:
+            return self.episode_metadata_by_dataset[dataset_idx][episode_index]
+        except KeyError as exc:
+            raise KeyError(
+                f'No episode metadata for episode_index={episode_index} in '
+                f'dataset {self.data_root_path[dataset_idx]!r}.') from exc
+
+    def _get_task_index(self, dataset_idx: int, index: int) -> int:
+        if not self.separate_subtasks_by_dataset[dataset_idx]:
+            return int(self.dataset[index]['task_index'])
+        episode_metadata = self._get_episode_metadata(dataset_idx, index)
+        if 'task_index' in episode_metadata:
+            return int(episode_metadata['task_index'])
+        raise KeyError(f'Episode metadata has no task_index in dataset '
+                       f'{self.data_root_path[dataset_idx]!r}.')
+
     def _get_task_name(self, dataset_idx: int, index: int) -> str:
-        task_idx = self.dataset[index]['task_index']
-        if task_idx < 0 or task_idx >= len(self.tasks[dataset_idx]):
-            return 'empty'
-        return self.tasks[dataset_idx][task_idx].get('task', 'empty')
+        task_index = self._get_task_index(dataset_idx, index)
+        task_definition = self.task_definitions_by_dataset[dataset_idx].get(
+            task_index)
+        if task_definition is None:
+            if not self.separate_subtasks_by_dataset[dataset_idx]:
+                return 'empty'
+            raise KeyError(
+                f'No task definition for task_index={task_index} in dataset '
+                f'{self.data_root_path[dataset_idx]!r}.')
+        return task_definition.get('task', 'empty')
+
+    def _get_subtask_index(self, dataset_idx: int, index: int) -> int:
+        key = ('subtask_index'
+               if self.separate_subtasks_by_dataset[dataset_idx] else
+               'task_index')
+        try:
+            return int(self.dataset[index][key])
+        except KeyError as exc:
+            raise KeyError(f'Parquet row has no {key!r} in dataset '
+                           f'{self.data_root_path[dataset_idx]!r}.') from exc
+
+    def _get_subtask_definition(self, dataset_idx: int,
+                                index: int) -> Dict[str, Any]:
+        subtask_index = self._get_subtask_index(dataset_idx, index)
+        definition = self.subtask_definitions_by_dataset[dataset_idx].get(
+            subtask_index)
+        if definition is None:
+            if not self.separate_subtasks_by_dataset[dataset_idx]:
+                return {'task_index': subtask_index, 'task': 'empty'}
+            raise KeyError(
+                f'No subtask definition for subtask_index={subtask_index} in '
+                f'dataset {self.data_root_path[dataset_idx]!r}.')
+        return definition
+
+    def _get_subtask_name(self, dataset_idx: int, index: int) -> str:
+        definition = self._get_subtask_definition(dataset_idx, index)
+        text_key = ('subtask' if self.separate_subtasks_by_dataset[dataset_idx]
+                    else 'task')
+        return definition.get(text_key, 'empty')
 
     def _invalid_start_index(self, index: int, dataset_idx: int,
                              data: Dict[str, Any]) -> bool:
-        if self._get_task_name(dataset_idx, index) in ('empty', 'static'):
+        if self._get_subtask_name(dataset_idx, index) in ('empty', 'static'):
             return True
 
         first_action_index = index + self.window_start_idx
@@ -351,12 +491,17 @@ class ParquetDataset(Dataset):
         if not self._same_episode_and_dataset(first_action_index, dataset_idx,
                                               data):
             return True
-        return self._get_task_name(dataset_idx,
-                                   first_action_index) in ('empty', 'static')
+        if (self.enforce_action_subtask_consistency
+                and self._get_subtask_index(dataset_idx, first_action_index) !=
+                self._get_subtask_index(dataset_idx, index)):
+            return True
+        return self._get_subtask_name(dataset_idx,
+                                      first_action_index) in ('empty',
+                                                              'static')
 
     def _same_episode_and_dataset(self, index: int, dataset_idx: int,
                                   data: Dict[str, Any]) -> bool:
-        return (index < len(self.dataset) and data['episode_index']
+        return (0 <= index < len(self.dataset) and data['episode_index']
                 == self.dataset[index]['episode_index']
                 and self._get_dataset_index(index) == dataset_idx)
 
@@ -365,7 +510,25 @@ class ParquetDataset(Dataset):
         data = self.dataset[index]
         # Determine which dataset the data belongs to
         dataset_idx = self._get_dataset_index(index)
+        retry_count = 0
         while self._invalid_start_index(index, dataset_idx, data):
+            retry_count += 1
+            if retry_count >= min(100, len(self.sample_indices)):
+                for candidate in self.sample_indices:
+                    candidate = int(candidate)
+                    candidate_data = self.dataset[candidate]
+                    candidate_dataset_idx = self._get_dataset_index(candidate)
+                    if not self._invalid_start_index(
+                            candidate, candidate_dataset_idx, candidate_data):
+                        index = candidate
+                        data = candidate_data
+                        dataset_idx = candidate_dataset_idx
+                        break
+                else:
+                    raise RuntimeError(
+                        'No actionable non-empty/non-static sample exists in '
+                        'the selected Parquet dataset episodes.')
+                break
             index = self._rand_another()
             data = self.dataset[index]
             # Recalculate dataset_idx
@@ -400,28 +563,61 @@ class ParquetDataset(Dataset):
                 mask_template, dtype=np.float32)
         else:
             invalid_action_mask = 0
+        current_subtask_index = self._get_subtask_index(dataset_idx, index)
+
+        def pad_action_window():
+            if actions:
+                padding_action = actions[-1]
+            else:
+                padding_action = select_action_dimensions(
+                    data[self.action_key], self.action_key)
+            while len(actions) < self.action_window_size:
+                actions.append(padding_action)
+                action_masks.append(invalid_action_mask)
+
         window_idx = self.window_start_idx
         while len(actions) < self.action_window_size:
             action_index = index + window_idx
             valid_window_index = self._same_episode_and_dataset(
                 action_index, dataset_idx, data)
-            action_task = (
-                self._get_task_name(dataset_idx, action_index)
+            action_subtask_index = (
+                self._get_subtask_index(dataset_idx, action_index)
                 if valid_window_index else None)
+            action_task = (
+                self._get_subtask_name(dataset_idx, action_index)
+                if valid_window_index else None)
+            if (valid_window_index and self.enforce_action_subtask_consistency
+                    and action_subtask_index != current_subtask_index):
+                pad_action_window()
+                break
             if valid_window_index and action_task not in ('empty', 'static'):
                 current_action = select_action_dimensions(
                     self.dataset[action_index][self.action_key],
                     self.action_key)
+                delta_previous_valid = True
                 if self.use_delta:
-                    previous_action = select_action_dimensions(
-                        self.dataset[action_index - 1][self.action_key],
-                        self.action_key)
-                    actions.append(current_action - previous_action)
+                    previous_index = action_index - 1
+                    delta_previous_valid = self._same_episode_and_dataset(
+                        previous_index, dataset_idx, data)
+                    if (delta_previous_valid
+                            and self.enforce_action_subtask_consistency):
+                        delta_previous_valid = (
+                            self._get_subtask_index(
+                                dataset_idx,
+                                previous_index) == action_subtask_index)
+                    if delta_previous_valid:
+                        previous_action = select_action_dimensions(
+                            self.dataset[previous_index][self.action_key],
+                            self.action_key)
+                        actions.append(current_action - previous_action)
+                    else:
+                        actions.append(np.zeros_like(current_action))
                 else:
                     actions.append(current_action)
                 scalar_valid = (
                     self.action_valid_key is None
                     or bool(self.dataset[action_index][self.action_valid_key]))
+                scalar_valid = scalar_valid and delta_previous_valid
                 if self.action_mask_key is None:
                     action_masks.append(int(scalar_valid))
                 else:
@@ -430,10 +626,9 @@ class ParquetDataset(Dataset):
                         dtype=np.float32)
                     dimension_mask = select_action_dimensions(
                         dimension_mask, self.action_mask_key)
-                    if self.use_delta and action_index > 0:
+                    if self.use_delta and delta_previous_valid:
                         previous_mask = np.asarray(
-                            self.dataset[action_index -
-                                         1][self.action_mask_key],
+                            self.dataset[previous_index][self.action_mask_key],
                             dtype=np.float32)
                         previous_mask = select_action_dimensions(
                             previous_mask, self.action_mask_key)
@@ -442,21 +637,14 @@ class ParquetDataset(Dataset):
                         dimension_mask = np.zeros_like(dimension_mask)
                     action_masks.append(dimension_mask)
             elif action_task == 'empty':
-                for _ in range(self.action_window_size - len(actions)):
-                    actions.append(actions[-1])
-                    action_masks.append(invalid_action_mask)
+                pad_action_window()
                 break
             elif action_task == 'static':
                 window_idx += 1
                 continue
             else:
-                if len(actions) > 0:
-                    actions.append(actions[-1])
-                else:
-                    actions.append(
-                        select_action_dimensions(data[self.action_key],
-                                                 self.action_key))
-                action_masks.append(invalid_action_mask)
+                pad_action_window()
+                break
             window_idx += 1
         # Collect forward-looking frame timestamps for video models
         if self.frame_window_size > 1:
@@ -483,8 +671,15 @@ class ParquetDataset(Dataset):
         data['action_masks'] = np.array(action_masks, dtype=np.float32)
         if self.expose_index:
             data['index'] = np.array(index, dtype=np.int64)
+        data['task_index'] = self._get_task_index(dataset_idx, index)
+        data['subtask_index'] = self._get_subtask_index(dataset_idx, index)
         data['task_description'] = self._get_task_name(dataset_idx, index)
+        data['subtask_description'] = self._get_subtask_name(
+            dataset_idx, index)
         data['data_root'] = self.data_root_path[dataset_idx]
+        if self.expose_subtask_metadata:
+            data['_subtask_definition'] = self._get_subtask_definition(
+                dataset_idx, index)
         for transform in self.transforms:
             data = transform(data)
 

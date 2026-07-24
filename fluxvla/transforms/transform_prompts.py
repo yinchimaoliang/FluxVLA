@@ -34,6 +34,8 @@ class ProcessPrompts():
             Defaults to 180.
         with_labels (bool, optional): Whether to include labels in
             the output. Defaults to False.
+        task_key (str, optional): Input field used as the language
+            instruction. Defaults to ``task_description``.
     """
 
     def __init__(self,
@@ -210,13 +212,15 @@ class ProcessPromptsWithImage:
             padding_side: str = 'left',  # 'left' or 'right'
             use_eos_as_pad: bool = True,
             return_text: bool = False,
-            model_path=None):  # noqa: E129
+            model_path=None,
+            task_key: str = 'task_description'):  # noqa: E129
         from fluxvla.engines import build_tokenizer_from_cfg
         if model_path is not None:
             tokenizer['model_path'] = os.path.join(model_path, 'tokenizer')
         self.tokenizer = build_tokenizer_from_cfg(tokenizer)
         self.max_len = max_len
         self.with_labels = with_labels
+        self.task_key = task_key
 
         self.add_system = add_system
         self.system_prompt = system_prompt
@@ -292,13 +296,14 @@ class ProcessPromptsWithImage:
         requirement, and optionally creates a 'labels'
         field for language modeling tasks.
         """
-        assert 'task_description' in inputs, "inputs must contain 'task_description'"  # noqa: E501
+        assert self.task_key in inputs, \
+            f'inputs must contain {self.task_key!r}'
 
         # (1) resolve per-image token counts
         per_img = [int(self.fixed_img_tokens)] * self.num_images
 
         # (2) build GR00T-style text
-        text = self._build_text(inputs['task_description'], per_img)
+        text = self._build_text(inputs[self.task_key], per_img)
 
         # (3) tokenize
         encoded = self.tokenizer(text, add_special_tokens=True)

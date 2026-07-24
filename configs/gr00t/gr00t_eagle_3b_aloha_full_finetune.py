@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dataset contract: agilex_aloha_unified@4.0.0 / dataset 2.0.0.
+# Dataset contract: agilex_aloha_unified@1.0.0 / dataset 1.0.0.
 # Parquet stores only unified_107d robot vectors plus per-dimension masks;
 # qpose/eepose are losslessly decoded at runtime to avoid duplicate columns.
 # GR00T-N1.5 retains its pretrained 64D state / 32D action envelopes and uses
@@ -103,10 +103,13 @@ train_dataloader = dict(
                 [
                     './datasets/RealRobot_AgileX_aloha_lerobot/example_canonical_107d_v3_1',  # noqa: E501
                 ],
-                expected_dataset_version='2.0.0',
+                expected_dataset_version='1.0.0',
                 expected_schema_id='agilex_aloha_unified',
-                expected_schema_version='4.0.0',
+                expected_schema_version='1.0.0',
+                expose_subtask_metadata=True,
+                enforce_action_subtask_consistency=True,
                 transforms=[
+                    dict(type='LoadSubtask'),
                     dict(
                         type='ProcessParquetInputs',
                         embodiment_id=0,
@@ -114,8 +117,9 @@ train_dataloader = dict(
                             'observation.unified_107d',
                             'observation.unified_107d_mask',
                             'observation.ego2cam', 'observation.ego2cam_valid',
-                            'timestamp', 'actions', 'info', 'stats',
-                            'action_masks'
+                            'timestamp', 'task_index', 'subtask_index',
+                            'subtask', 'subtask_description', 'actions',
+                            'info', 'stats', 'action_masks'
                         ],
                         video_keys=[
                             'observation.images.cam_high',
@@ -126,9 +130,12 @@ train_dataloader = dict(
                         type='DecodeAlohaUnified107D',
                         qpose_indices=ALOHA_QPOSE_INDICES,
                         eepose_indices=ALOHA_EEPOSE_INDICES),
-                    dict(type='ParquetPrompter'),
+                    dict(
+                        type='ParquetPrompter',
+                        task_key='subtask_description'),
                     dict(
                         type='ProcessPromptsWithImage',
+                        task_key='subtask_description',
                         max_len=900,
                         num_images=3,
                         tokenizer=dict(
@@ -182,7 +189,10 @@ runner = dict(
             'lang_tokens', 'lang_masks', 'actions', 'action_masks',
             'embodiment_ids'
         ],
-        meta_keys=['task_description', 'prompt', 'info', 'stats']),
+        meta_keys=[
+            'task_index', 'subtask_index', 'task_description',
+            'subtask_description', 'subtask', 'prompt', 'info', 'stats'
+        ]),
     metric=dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),

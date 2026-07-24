@@ -87,6 +87,79 @@ class ProcessLiberoInputs():
 
 
 @TRANSFORMS.register_module()
+class LoadSubtask:
+    """Resolve the current frame's normalized subtask metadata.
+
+    ``ParquetDataset`` supplies the definition selected directly by the
+    Parquet ``subtask_index``. This transform validates that foreign key and
+    emits a compact ``subtask`` dictionary plus ``subtask_description``.
+    """
+
+    def __init__(self,
+                 output_key: str = 'subtask',
+                 description_output_key: str = 'subtask_description',
+                 definition_key: str = '_subtask_definition',
+                 pop_source_metadata: bool = True):
+        self.output_key = output_key
+        self.description_output_key = description_output_key
+        self.definition_key = definition_key
+        self.pop_source_metadata = pop_source_metadata
+
+    @staticmethod
+    def _scalar_int(value, key: str) -> int:
+        value = np.asarray(value)
+        if (value.size != 1 or not np.issubdtype(value.dtype, np.integer)):
+            raise ValueError(f'{key} must be one integer scalar.')
+        return int(value.reshape(-1)[0])
+
+    def __call__(self, data):
+        if self.definition_key not in data:
+            raise KeyError('LoadSubtask requires ParquetDataset('
+                           'expose_subtask_metadata=True).')
+
+        index_key = ('subtask_index'
+                     if 'subtask_index' in data else 'task_index')
+        subtask_index = self._scalar_int(data.get(index_key), index_key)
+        definition = data[self.definition_key]
+        if not isinstance(definition, dict):
+            raise ValueError('Subtask definition must be a dictionary.')
+        definition_index_key = ('subtask_index' if 'subtask_index'
+                                in definition else 'task_index')
+        definition_subtask_index = self._scalar_int(
+            definition.get(definition_index_key),
+            f'definition.{definition_index_key}')
+        if definition_subtask_index != subtask_index:
+            raise ValueError(
+                'Subtask index mismatch between Parquet and definition.')
+
+        text_key = 'subtask' if 'subtask' in definition else 'task'
+        subtask = definition.get(text_key)
+        if not isinstance(subtask, str) or not subtask:
+            raise ValueError(
+                'Subtask definition must contain non-empty subtask text.')
+
+        data[self.output_key] = {
+            'subtask_index':
+            subtask_index,
+            'subtask_id':
+            definition.get('subtask_id', definition.get('task_id')),
+            'subtask':
+            subtask,
+            'subtask_category':
+            definition.get('subtask_category',
+                           definition.get('task_category')),
+            'required_effectors':
+            list(definition.get('required_effectors') or []),
+            'annotation_provenance':
+            definition.get('annotation_provenance'),
+        }
+        data[self.description_output_key] = subtask
+        if self.pop_source_metadata:
+            data.pop(self.definition_key)
+        return data
+
+
+@TRANSFORMS.register_module()
 class ProcessParquetInputs():
     """Process inputs for Parquet dataset.
     This transform processes the inputs from the Parquet

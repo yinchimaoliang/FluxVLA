@@ -197,6 +197,7 @@ class ParquetPrompter:
                  use_conversation: bool = True,
                  add_new_line: bool = False,
                  lowercase_task_description: bool = False,
+                 task_key: str = 'task_description',
                  *args,
                  **kwargs):
         self.prompt = ''
@@ -211,11 +212,12 @@ class ParquetPrompter:
         self.use_conversation = use_conversation
         self.add_new_line = add_new_line
         self.lowercase_task_description = lowercase_task_description
+        self.task_key = task_key
 
     def __call__(self, inputs):
-        assert 'task_description' in inputs, \
-            "Data must contain 'task_description' key."
-        task_description = inputs['task_description']
+        assert self.task_key in inputs, \
+            f'Data must contain {self.task_key!r} key.'
+        task_description = inputs[self.task_key]
         if self.lowercase_task_description:
             task_description = str(task_description).lower()
         if not self.use_conversation:
