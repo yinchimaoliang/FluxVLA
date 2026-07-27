@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Dataset contract: agilex_aloha_unified@1.0.0 / dataset 1.0.0.
+# Dataset contract: agilex_aloha_unified@1.1.0 / dataset 1.1.0.
 # Parquet stores only unified_107d robot vectors plus per-dimension masks;
 # qpose/eepose are losslessly decoded at runtime to avoid duplicate columns.
 # GR00T-N1.5 retains its pretrained 64D state / 32D action envelopes and uses
@@ -103,9 +103,9 @@ train_dataloader = dict(
                 [
                     './datasets/RealRobot_AgileX_aloha_lerobot/example_canonical_107d_v3_1',  # noqa: E501
                 ],
-                expected_dataset_version='1.0.0',
+                expected_dataset_version='1.1.0',
                 expected_schema_id='agilex_aloha_unified',
-                expected_schema_version='1.0.0',
+                expected_schema_version='1.1.0',
                 expose_subtask_metadata=True,
                 enforce_action_subtask_consistency=True,
                 transforms=[
