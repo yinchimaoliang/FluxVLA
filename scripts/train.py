@@ -27,6 +27,7 @@ import torch.distributed as dist
 import yaml
 from mmengine import Config, DictAction
 
+import fluxvla  # noqa: F401
 from fluxvla.datasets.utils import (save_dataset_statistics,
                                     save_grouped_dataset_statistics)
 from fluxvla.engines import (build_dataset_from_cfg, build_runner_from_cfg,
