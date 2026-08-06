@@ -254,7 +254,7 @@ class EagleInferenceBackbone(nn.Module):
                  vlm_config: Dict = None,
                  project_to_dim: Optional[int] = None,
                  select_layer: int = 12,
-                 dtype='float32'):
+        dtype='float32'):
         super().__init__()
 
         config = AutoConfig.from_pretrained(vlm_path, trust_remote_code=True)
@@ -276,12 +276,6 @@ class EagleInferenceBackbone(nn.Module):
         # Use torch_dtype parameter to initialize directly with the target
         # dtype This avoids the expensive .to() conversion after initialization
         target_dtype = str_to_dtype(dtype) if dtype is not None else None
-
-        # Import the accelerated Eagle inference model lazily. It depends on
-        # optional compiled FluxVLA CUDA extensions that are not required by
-        # other backbones, including native GR00T N1.7.
-        from fluxvla.models.third_party_models.eagle2_hg_model.modeling_eagle2_5_vl_inference import \
-            Eagle2_5_VLInferenceForConditionalGeneration  # noqa: E501
 
         # Initialize model and convert to target dtype
         try:
