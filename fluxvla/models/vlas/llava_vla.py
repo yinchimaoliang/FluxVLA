@@ -18,17 +18,19 @@ from typing import Dict, List, Optional
 import torch
 
 from fluxvla.engines import VLAS, initialize_overwatch
-from .open_vla import OpenVLA
+from .base_vla import BaseVLA
 
 overwatch = initialize_overwatch(__name__)
 
 
 @VLAS.register_module()
-class LlavaVLA(OpenVLA):
+class LlavaVLA(BaseVLA):
     """
-    LlavaVLA is a variant of the OpenVLA model specifically designed for
-    Llava-based architectures. It inherits from OpenVLA and is registered
-    in the VLAS registry for easy instantiation.
+    Continuous-action VLA wrapper for LLaVA-style architectures.
+
+    The class inherits directly from :class:`BaseVLA`. It supports either a
+    combined ``vlm_backbone`` or separate vision/LLM/projector modules, and
+    forwards the resulting hidden states to a continuous-action head.
 
     Args:
         vla_head (Dict): Configuration dictionary for the VLA head.
@@ -101,11 +103,16 @@ class LlavaVLA(OpenVLA):
             vision_backbone_fp32=vision_backbone_fp32,
             unfreeze_last_layer=unfreeze_last_layer,
             ignore_index=ignore_index,
-            freeze_weights=freeze_weights,
             norm_stats=norm_stats,
             pretrained_name_or_path=pretrained_name_or_path,
             name_mapping=name_mapping,
             strict_mapping=strict_mapping)
+        # Keep the same runner-facing module metadata and initialization state
+        # that LlavaVLA previously received through OpenVLA.
+        self.all_module_keys = [
+            'vision_backbone', 'llm_backbone', 'projector', 'head'
+        ]
+        self.string2idx = {}
 
     def forward(self,
                 lang_tokens: Optional[torch.LongTensor] = None,
@@ -129,8 +136,7 @@ class LlavaVLA(OpenVLA):
                 *args,
                 **kwargs) -> Dict:
         """
-        Forward pass for the LlavaVLA model. This method is inherited from
-        OpenVLA and can be overridden if specific behavior is needed.
+        Forward pass for the LlavaVLA model.
         """
 
         # Check if the model has a VLM backbone and use it if available.
