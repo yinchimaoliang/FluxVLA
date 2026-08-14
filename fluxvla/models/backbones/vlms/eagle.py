@@ -254,7 +254,7 @@ class EagleInferenceBackbone(nn.Module):
                  vlm_config: Dict = None,
                  project_to_dim: Optional[int] = None,
                  select_layer: int = 12,
-        dtype='float32'):
+                 dtype='float32'):
         super().__init__()
 
         config = AutoConfig.from_pretrained(vlm_path, trust_remote_code=True)
