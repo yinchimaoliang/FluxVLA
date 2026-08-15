@@ -13,7 +13,7 @@
 # limitations under the License.
 """Native GR00T N1.7 LIBERO-10 parquet fine-tuning config.
 
-Defaults follow the official GR00T N1.7 LIBERO fine-tuning recipe.
+Training defaults follow the official GR00T N1.7 LIBERO fine-tuning recipe.
 LIBERO modality metadata and normalization statistics are self-contained
 in this config.
 """
@@ -366,7 +366,11 @@ runner = dict(
         weight_decay=1e-5,
     ),
     max_grad_norm=1.0,
-    grad_accumulation_steps=2,
+    # Official recipe: 640 samples in one forward/backward pass
+    # (80 per device x 8 GPUs), with no gradient accumulation. A 40 x 8 x 2
+    # run has the same nominal optimizer batch size but a different optimizer,
+    # augmentation, and dropout trajectory.
+    grad_accumulation_steps=1,
     sampler=None,
     save_iter_interval=1000,
     save_epoch_interval=1,
@@ -389,7 +393,7 @@ runner = dict(
         type='VLAMetric',
         active_trackers=_ACTIVE_TRACKERS,
         run_dir='work_dirs',
-        grad_accumulation_steps=2,
+        grad_accumulation_steps=1,
         window_size=1),
     lr_scheduler=dict(
         type='linear-warmup+cosine-decay',
