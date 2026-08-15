@@ -53,4 +53,5 @@ from .root import VLAS  # noqa: F401, F403
 from .root import VLM_BACKBONES  # noqa: F401, F403
 from .root import WEIGHTERS  # noqa: F401, F403
 from .torch_utils import check_bloat16_supported  # noqa: F401, F403
+from .torch_utils import configure_deterministic_training  # noqa: F401, F403
 from .torch_utils import set_seed_everywhere  # noqa: F401, F403

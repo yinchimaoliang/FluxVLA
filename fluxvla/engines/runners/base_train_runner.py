@@ -29,7 +29,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from fluxvla.engines.utils import check_bloat16_supported
+from fluxvla.engines.utils import (check_bloat16_supported,
+                                   configure_deterministic_training)
 from fluxvla.engines.utils.name_map import str_to_dtype
 from fluxvla.engines.utils.torch_utils import worker_init_function
 from ..utils import (build_evaluator_from_cfg, build_lr_scheduler_from_cfg,
@@ -88,9 +89,12 @@ class BaseTrainRunner(ABC):
                  reduce_in_full_precision: bool = True,
                  mixed_precision_dtype: str = 'bf16',
                  grad_accumulation_steps: int = 1,
+                 deterministic_training: bool = False,
                  evaluator: Optional[Dict] = None,
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None):
+        configure_deterministic_training(deterministic_training)
+
         from ..utils.builder import (build_collator_from_cfg,
                                      build_metric_from_cfg, build_vla_from_cfg)
 
@@ -143,6 +147,7 @@ class BaseTrainRunner(ABC):
         self.mixed_precision_dtype = str_to_dtype(mixed_precision_dtype)
         self.per_device_batch_size = cfg.train_dataloader.per_device_batch_size
         self.grad_accumulation_steps = grad_accumulation_steps
+        self.deterministic_training = bool(deterministic_training)
         self.evaluator = (
             build_evaluator_from_cfg(evaluator)
             if evaluator is not None else None)
@@ -822,7 +827,8 @@ class BaseTrainRunner(ABC):
             f'steps/epoch={self.steps_per_epoch}, '
             f'batch={self.global_batch_size} '
             f'({self.per_device_batch_size}x{overwatch.world_size()}'
-            f'x{self.grad_accumulation_steps})')
+            f'x{self.grad_accumulation_steps}), '
+            f'deterministic={self.deterministic_training}')
 
     def _vla_accepts_kwarg(self, key: str) -> bool:
         """Return whether the wrapped VLA forward accepts ``key``."""

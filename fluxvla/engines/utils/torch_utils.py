@@ -24,6 +24,24 @@ import torch
 DEFAULT_INFERENCE_SDPA_BACKENDS = None
 
 
+def configure_deterministic_training(enabled: bool = False) -> None:
+    """Enable deterministic CUDA kernels for reproducible training.
+
+    PyTorch SDPA backward can otherwise produce different gradients for the
+    same weights, inputs, and seed.  Keep this opt-in because deterministic
+    kernels can be slower and use more memory.
+    """
+    if not enabled:
+        return
+
+    # Required by deterministic CUDA matrix multiplications. This must be set
+    # before the first cuBLAS operation in the process.
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def configure_sdpa_backends_from_env(default: str = None) -> None:
     """Apply PyTorch SDPA backend selection from env or an optional default."""
     backend_spec = os.environ.get('FLUXVLA_SDPA_BACKENDS', default)

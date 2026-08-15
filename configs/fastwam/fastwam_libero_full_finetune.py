@@ -231,6 +231,9 @@ runner = dict(
     ),
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
+    # SDPA backward is otherwise non-deterministic even with a fixed seed,
+    # which can send repeated FastWAM runs to different final checkpoints.
+    deterministic_training=True,
     grad_accumulation_steps=4,
     mixed_precision_dtype='bf16',
     static_graph=False,

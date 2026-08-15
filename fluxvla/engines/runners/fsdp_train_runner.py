@@ -84,6 +84,7 @@ class FSDPTrainRunner(BaseTrainRunner):
                  reduce_in_full_precision: bool = True,
                  mixed_precision_dtype: str = 'bf16',
                  grad_accumulation_steps: int = 1,
+                 deterministic_training: bool = False,
                  evaluator: Optional[Dict] = None,
                  sharding_strategy: str = 'hybrid-shard',
                  change_key_name: bool = False,
@@ -114,6 +115,7 @@ class FSDPTrainRunner(BaseTrainRunner):
             reduce_in_full_precision=reduce_in_full_precision,
             mixed_precision_dtype=mixed_precision_dtype,
             grad_accumulation_steps=grad_accumulation_steps,
+            deterministic_training=deterministic_training,
             evaluator=evaluator,
             tokenizer=tokenizer,
             resume_from=resume_from)
