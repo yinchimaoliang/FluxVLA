@@ -25,6 +25,36 @@ overwatch = initialize_overwatch(__name__)
 _ALL_LINEAR_TARGET = 'all-linear'
 
 
+def _config_value(config, key: str, default=None):
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _resolve_lora_before_device_move(cfg: Dict,
+                                     configured: Optional[bool]) -> bool:
+    """Resolve LoRA injection order while preserving existing recipes.
+
+    Official OpenVLA fine-tuning first casts and places the base model, then
+    creates the PEFT adapters. PEFT consequently keeps the trainable LoRA
+    weights in fp32. Other model families retain the historical FluxVLA
+    ordering unless their config explicitly opts out.
+    """
+    if configured is not None:
+        return configured
+    model_cfg = _config_value(cfg, 'model', {})
+    return _config_value(model_cfg, 'type') != 'OpenVLA'
+
+
+def _trainable_parameter_dtype_counts(model: torch.nn.Module) -> Dict:
+    counts = {}
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            counts[parameter.dtype] = counts.get(parameter.dtype,
+                                                 0) + parameter.numel()
+    return counts
+
+
 def _collect_output_embedding_ids(model: torch.nn.Module) -> set:
     output_embedding_ids = set()
     for module in model.modules():
@@ -122,7 +152,7 @@ class DDPTrainRunner(BaseTrainRunner):
                  evaluator: Optional[Dict] = None,
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
-                 lora_before_device_move: bool = True,
+                 lora_before_device_move: Optional[bool] = None,
                  static_graph: bool = True,
                  **kwargs) -> None:
 
@@ -159,7 +189,8 @@ class DDPTrainRunner(BaseTrainRunner):
         self.cfg = cfg
         self.args = args
         self.max_grad_norm = max_grad_norm
-        self.lora_before_device_move = lora_before_device_move
+        self.lora_before_device_move = _resolve_lora_before_device_move(
+            cfg, lora_before_device_move)
         self.static_graph = static_graph
         self.distributed_state = overwatch.distributed_state
         self.recent_losses = deque(maxlen=self.grad_accumulation_steps)
@@ -213,6 +244,35 @@ class DDPTrainRunner(BaseTrainRunner):
         self.vla = get_peft_model(self.vla, lora_config)
         self.vla.print_trainable_parameters()
 
+    def _log_and_validate_trainable_dtypes(self) -> None:
+        dtype_counts = _trainable_parameter_dtype_counts(self.vla)
+        if overwatch.is_rank_zero():
+            summary = ', '.join(
+                f'{str(dtype).removeprefix("torch.")}={format(count, ",")}'
+                for dtype, count in sorted(
+                    dtype_counts.items(), key=lambda item: str(item[0])))
+            overwatch.info(f'Trainable parameter dtypes: {summary}')
+
+        model_type = _config_value(
+            _config_value(self.cfg, 'model', {}), 'type')
+        if (model_type == 'OpenVLA' and self._model_uses_lora()
+                and not self.lora_before_device_move):
+            lora_dtypes = {
+                parameter.dtype
+                for name, parameter in self.vla.named_parameters()
+                if parameter.requires_grad and 'lora_' in name
+            }
+            if not lora_dtypes:
+                raise RuntimeError(
+                    'OpenVLA LoRA setup produced no trainable adapter weights.'
+                )
+            if lora_dtypes != {torch.float32}:
+                raise RuntimeError(
+                    'OpenVLA LoRA adapters must remain fp32 to match the '
+                    'official recipe, but found '
+                    f'{sorted(map(str, lora_dtypes))}. '
+                    'Create LoRA after moving the bf16 base model.')
+
     def run_setup(self, n_train_examples: int) -> None:
         """Setup DDP-specific model configuration and distributed training."""
         torch.cuda.empty_cache()
@@ -226,10 +286,9 @@ class DDPTrainRunner(BaseTrainRunner):
         if use_lora and self.lora_before_device_move:
             self._apply_lora()
 
-            # Preserve the OpenVLA LoRA recipe that produced the known-good
-            # LIBERO results: create adapters and bind optimizer before the
-            # mixed-precision device move, then move the full PEFT-wrapped
-            # model together.
+            # Preserve the legacy ordering for non-OpenVLA recipes that opt
+            # in: create adapters and bind the optimizer before moving the
+            # complete PEFT model.
             self._setup_optimizer_and_scheduler(n_train_examples)
             self._move_vla_to_device(target_device)
         else:
@@ -239,6 +298,8 @@ class DDPTrainRunner(BaseTrainRunner):
 
             # Setup optimizer and scheduler using base class method.
             self._setup_optimizer_and_scheduler(n_train_examples)
+
+        self._log_and_validate_trainable_dtypes()
 
         # Apply Gradient Checkpointing (after moving to device)
         if self.enable_gradient_checkpointing:

@@ -245,6 +245,8 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
+    # Match official OpenVLA: cast/place the base first, then create fp32 LoRA.
+    lora_before_device_move=False,
     static_graph=False)
 
 eval = dict(

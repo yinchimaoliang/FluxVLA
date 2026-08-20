@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""OpenVLA LoRA fine-tuning on the 24-task RoboCasa GR1 dataset."""
 
 seed = 7
 
@@ -33,8 +34,7 @@ model = dict(
         type='LLaMa2LLMBackbone',
         llm_backbone_id='llama2-7b-pure_causal',
         llm_family='llama',
-        llm_path=  # noqa: E251
-        './checkpoints/Llama-2-7b-hf',  # noqa: E501
+        llm_path='./checkpoints/Llama-2-7b-hf',
         llm_max_length=2048,
         hf_token=None,
         inference_mode=False,
@@ -43,21 +43,16 @@ model = dict(
         type='FusedMLPProjector', fused_vision_dim=2176, llm_dim=4096),
     tokenizer=dict(
         type='ActionTokenizer',
-        model_path=  # noqa: E251
-        'checkpoints/openvla-7b',  # noqa: E501
+        model_path='./checkpoints/openvla-7b',
         bins=256,
         min_action=-1,
-        max_action=1,
-    ),
-    pretrained_name_or_path=  # noqa: E251
-    './checkpoints/openvla-7b',  # noqa: E501
+        max_action=1),
+    pretrained_name_or_path='./checkpoints/openvla-7b',
     vla_head=dict(type='OpenVLAHead', norm_stats=None, vocab_size=32000),
     freeze_vision_backbone=False,
     freeze_llm_backbone=False,
     freeze_projector=False,
     use_lora=True,
-    # Keep the known-good 87a24a0 adapter recipe. Increasing adapter
-    # capacity and adding dropout regressed all evaluated LIBERO suites.
     lora_rank=32,
     lora_alpha=16,
     lora_dropout=0.0,
@@ -74,6 +69,49 @@ model = dict(
         'projector.projector.4': 'projector.fc3'
     })
 
+_ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_30ep'
+_ROBOCASA_DATA_ROOT = './datasets/robocasa_lerobot_V2.1'
+_OFFICIAL_GR1_STATS_PATH = ('./datasets/robocasa_gr1_24tasks_first30ep/'
+                            'official_groot_gr1_dataset_statistics.json')
+_ROBOCASA_TASK_PREFIX = 'gr1_unified'
+_ROBOCASA_ENV_SUFFIX = '_GR1ArmsAndWaistFourierHands_Env'
+
+_ROBOCASA_TASK_NAMES = [
+    'PnPBottleToCabinetClose',
+    'PnPCanToDrawerClose',
+    'PnPCupToDrawerClose',
+    'PnPMilkToMicrowaveClose',
+    'PnPPotatoToMicrowaveClose',
+    'PnPWineToCabinetClose',
+    'PosttrainPnPNovelFromCuttingboardToBasketSplitA',
+    'PosttrainPnPNovelFromCuttingboardToCardboardboxSplitA',
+    'PosttrainPnPNovelFromCuttingboardToPanSplitA',
+    'PosttrainPnPNovelFromCuttingboardToPotSplitA',
+    'PosttrainPnPNovelFromCuttingboardToTieredbasketSplitA',
+    'PosttrainPnPNovelFromPlacematToBasketSplitA',
+    'PosttrainPnPNovelFromPlacematToBowlSplitA',
+    'PosttrainPnPNovelFromPlacematToPlateSplitA',
+    'PosttrainPnPNovelFromPlacematToTieredshelfSplitA',
+    'PosttrainPnPNovelFromPlateToBowlSplitA',
+    'PosttrainPnPNovelFromPlateToCardboardboxSplitA',
+    'PosttrainPnPNovelFromPlateToPanSplitA',
+    'PosttrainPnPNovelFromPlateToPlateSplitA',
+    'PosttrainPnPNovelFromTrayToCardboardboxSplitA',
+    'PosttrainPnPNovelFromTrayToPlateSplitA',
+    'PosttrainPnPNovelFromTrayToPotSplitA',
+    'PosttrainPnPNovelFromTrayToTieredbasketSplitA',
+    'PosttrainPnPNovelFromTrayToTieredshelfSplitA',
+]
+
+
+def _robocasa_data_path(task_name):
+    return f'{_ROBOCASA_DATA_ROOT}/{task_name}'
+
+
+def _robocasa_task_env(task_name):
+    return f'{_ROBOCASA_TASK_PREFIX}/{task_name}{_ROBOCASA_ENV_SUFFIX}'
+
+
 train_dataloader = dict(
     per_device_batch_size=16,
     per_device_num_workers=8,
@@ -84,34 +122,15 @@ train_dataloader = dict(
             'action': ['action'],
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
-        statistic_name='libero_object_no_noops',
+        statistic_name=_ROBOCASA_STATISTIC_NAME,
+        dataset_statistics_path=_OFFICIAL_GR1_STATS_PATH,
         reshuffle_each_epoch=True,
-        statistics_overrides=dict(
-            libero_object_no_noops=dict(
-                action=dict(
-                    q01=[
-                        -0.5383928418159485,
-                        -0.8758928775787354,
-                        -0.9375,
-                        -0.06964285671710968,
-                        -0.11678571254014969,
-                        -0.15964286029338837,
-                        0.0,
-                    ],
-                    q99=[
-                        0.8464285731315613,
-                        0.84375,
-                        0.9375,
-                        0.08142857253551483,
-                        0.14892856776714325,
-                        0.0867857113480568,
-                        1.0,
-                    ],
-                    mask=[True, True, True, True, True, True, False],
-                ), ), ),
         datasets=dict(
             type='ParquetDataset',
-            data_root_path='./datasets/libero_object_no_noops_lerobotv2.1',
+            data_root_path=[
+                _robocasa_data_path(task_name)
+                for task_name in _ROBOCASA_TASK_NAMES
+            ],
             transforms=[
                 dict(
                     type='ProcessParquetInputs',
@@ -123,71 +142,55 @@ train_dataloader = dict(
                         'stats',
                         'action_masks',
                     ],
+                    # Duplicate the ego view for DINO and SigLIP.
                     video_keys=[
-                        'observation.images.image',
-                        'observation.images.image',
+                        'observation.images.ego_view',
+                        'observation.images.ego_view',
                     ],
                     name_mappings={
                         'observation.state': ['states'],
                         'actions': ['actions'],
                     },
-                    dataset_name='libero_object_no_noops',
-                ),
+                    dataset_name=_ROBOCASA_STATISTIC_NAME),
                 dict(
                     type='NormalizeStatesAndActions',
-                    action_dim=7,
+                    action_dim=29,
+                    state_dim=29,
                     state_key='proprio',
                     action_key='action',
                     norm_type='quantile',
-                    state_norm_type='min_max',
+                    state_norm_type='none',
                     action_norm_type='quantile',
+                    normalize_states=False,
                     clip_norm=True,
-                    normalization_epsilon=1e-8,
-                    action_norm_mask=[
-                        True,
-                        True,
-                        True,
-                        True,
-                        True,
-                        True,
-                        False,
-                    ],
-                ),
+                    normalization_epsilon=1e-8),
                 dict(
                     type='ParquetPrompter',
                     lowercase_task_description=True,
                     action_tokenizer=dict(
                         type='ActionTokenizer',
-                        model_path=  # noqa: E251
-                        './checkpoints/openvla-7b',  # noqa: E501
+                        model_path='./checkpoints/openvla-7b',
                         bins=256,
                         min_action=-1,
-                        max_action=1,
-                    ),
-                ),
+                        max_action=1)),
                 dict(
                     type='ProcessPrompts',
                     tokenizer=dict(
                         type='PretrainedTokenizer',
-                        model_path=  # noqa: E251
-                        './checkpoints/openvla-7b',  # noqa: E501
-                    ),
+                        model_path='./checkpoints/openvla-7b'),
                     max_len=None,
-                    with_labels=True,
-                ),
+                    with_labels=True),
                 dict(
                     type='ResizeImagesLanczos',
                     height=256,
                     width=256,
-                    backend='tensorflow',
-                ),
+                    backend='tensorflow'),
                 dict(
                     type='ResizeImagesLanczos',
                     height=224,
                     width=224,
                     backend='tensorflow',
-                    jpeg_roundtrip=True,
-                ),
+                    jpeg_roundtrip=True),
                 dict(
                     type='AugImage',
                     rotation_range=0.0,
@@ -199,34 +202,30 @@ train_dataloader = dict(
                     saturation_range=(0.8, 1.2),
                     hue_delta=0.05,
                     share_across_dinosiglip=True,
-                    backend='tensorflow',
-                ),
+                    backend='tensorflow'),
                 dict(
                     type='NormalizeImages',
                     means=[[123.515625, 116.04492188, 103.59375],
                            [128, 128, 128]],
                     stds=[[58.27148438, 57.02636719, 57.27539062],
-                          [128, 128, 128]],
-                ),
+                          [128, 128, 128]]),
             ],
             action_window_size=1,
             action_key='action',
             use_delta=False,
-            statistic_name='libero_object_no_noops',
+            statistic_name=_ROBOCASA_STATISTIC_NAME,
             window_start_idx=0,
             train_episode_fraction=1.0,
-            repeat_to_full_length=True,
-        ),
-    ))
+            repeat_to_full_length=True)))
 
 runner = dict(
     type='DDPTrainRunner',
     max_epochs=None,
+    max_steps=100000,
     optimizer=dict(lr=5e-4, type='AdamW', weight_decay=None),
-    max_steps=50000,
     max_grad_norm=None,
     save_iter_interval=5000,
-    max_keep_ckpts=3,
+    max_keep_ckpts=8,
     sampler=None,
     collator=dict(
         type='PaddedCollatorForActionPrediction',
@@ -245,23 +244,37 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    # Match official OpenVLA: cast/place the base first, then create fp32 LoRA.
+    # Official OpenVLA order keeps newly-created LoRA weights in fp32.
     lora_before_device_move=False,
     static_graph=False)
 
 eval = dict(
-    type='LiberoEvalRunner',
+    type='RobocasaEvalRunner',
+    benchmark='robocasa',
+    task_suite_name='robocasa',
     model_family='openvla',
-    task_suite_name='libero_object',
+    task_list=[
+        _robocasa_task_env(task_name) for task_name in _ROBOCASA_TASK_NAMES
+    ],
+    total_tasks=24,
+    eval_chunk_size=1,
+    max_episode_steps=720,
+    num_trials_per_task=20,
+    seed=7,
+    unnorm_key=_ROBOCASA_STATISTIC_NAME,
+    norm_stats_path=_OFFICIAL_GR1_STATS_PATH,
+    action_order='fluxvla',
+    rollout_video_key='video.ego_view_bg_crop_pad_res256_freq20',
     dataset=dict(
-        type='LiberoParquetEvalDataset',
+        type='RobocasaEvalDataset',
+        unnorm_key=_ROBOCASA_STATISTIC_NAME,
         transforms=[
             dict(
-                type='ProcessLiberoEvalInputs',
-                img_keys=['agentview_image', 'agentview_image'],
-                center_crop=True,
+                type='ProcessRobocasaOpenVLAEvalInputs',
+                img_key='video.ego_view_bg_crop_pad_res256_freq20',
                 resize_size=224,
-                resize_backend='tensorflow',
+                center_crop=True,
+                crop_scale=0.9,
                 jpeg_roundtrip=True),
             dict(
                 type='TransformImage',
@@ -269,24 +282,18 @@ eval = dict(
                 input_sizes=[[3, 224, 224], [3, 224, 224]],
                 means=[[123.515625, 116.04492188, 103.59375], [128, 128, 128]],
                 stds=[[58.27148438, 57.02636719, 57.27539062], [128, 128,
-                                                                128]],
-            ),
+                                                                128]]),
             dict(
                 type='LiberoPromptFromInputs',
                 prompt_suffix=' ',
                 max_len=None,
                 tokenizer=dict(
                     type='PretrainedTokenizer',
-                    model_path=  # noqa: E251
-                    './checkpoints/openvla-7b',  # noqa: E501
-                )),
+                    model_path='./checkpoints/openvla-7b')),
         ]),
     denormalize_action=dict(
-        type='DenormalizeLiberoAction',
+        type='DenormalizeRobocasaAction',
         norm_type='quantile',
-        action_norm_mask=[True, True, True, True, True, True, False],
-    ),
-    resize_size=224,
-    num_trials_per_task=50,
-    num_steps_wait=10,
-    seed=7)
+        action_dim=29,
+        clip_actions=True,
+        stats_order='native'))

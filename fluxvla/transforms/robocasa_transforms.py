@@ -20,8 +20,11 @@ from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 
+from fluxvla.engines.utils.eval_utils import crop_and_resize
 from fluxvla.engines.utils.root import DATASETS, TRANSFORMS
+from .transform_images import _resize_hwc_lanczos3_tensorflow
 
 # This order must match the converted training parquet exactly:
 # left_arm + left_hand + right_arm + right_hand + waist.
@@ -305,6 +308,71 @@ class ProcessRobocasaEvalInputs:
         if 'stats' in data:
             result['stats'] = data['stats']
 
+        return result
+
+
+@TRANSFORMS.register_module()
+class ProcessRobocasaOpenVLAEvalInputs:
+    """Build the two PIL image inputs expected by OpenVLA's fused vision.
+
+    RoboCasa observations are already in the policy camera orientation, so
+    unlike LIBERO this transform does not rotate the frame. It otherwise uses
+    the OpenVLA evaluation path: JPEG round-trip, TensorFlow Lanczos resize,
+    and deterministic center crop corresponding to the training crop area.
+    """
+
+    def __init__(self,
+                 img_key: str = 'video.ego_view_bg_crop_pad_res256_freq20',
+                 resize_size: int = 224,
+                 center_crop: bool = True,
+                 crop_scale: float = 0.9,
+                 jpeg_roundtrip: bool = True):
+        if not (0 < crop_scale <= 1):
+            raise ValueError(f'crop_scale must be in (0, 1], got {crop_scale}')
+        if resize_size != 224:
+            raise ValueError(
+                'OpenVLA fused vision expects resize_size=224, got '
+                f'{resize_size}')
+        self.img_key = img_key
+        self.resize_size = resize_size
+        self.center_crop = center_crop
+        self.crop_scale = crop_scale
+        self.jpeg_roundtrip = jpeg_roundtrip
+
+    def __call__(self, data: Dict) -> Dict:
+        if self.img_key not in data:
+            raise KeyError(f'Missing RoboCasa image key: {self.img_key!r}')
+
+        img = np.asarray(data[self.img_key])
+        if img.ndim != 3 or img.shape[-1] != 3:
+            raise ValueError(f'Expected HWC RGB image, got shape {img.shape}')
+
+        result = {
+            'replay_img': img.copy(),
+            'task_description': data.get('task_description', ''),
+        }
+        img = _resize_hwc_lanczos3_tensorflow(
+            img,
+            self.resize_size,
+            self.resize_size,
+            jpeg_roundtrip=self.jpeg_roundtrip)
+        if self.center_crop:
+            img = crop_and_resize(img, self.crop_scale, batch_size=1)
+
+        image = Image.fromarray(np.asarray(img, dtype=np.uint8)).convert('RGB')
+        result['pixel_values'] = [image.copy(), image.copy()]
+        result['img_masks'] = np.array([True, True])
+
+        state_parts = []
+        for key in ROBOCASA_STATE_KEYS:
+            if key in data:
+                state_parts.append(np.asarray(data[key], dtype=np.float32))
+        if state_parts:
+            result['states'] = np.concatenate(state_parts)
+
+        for key in ('norm_stats', 'stats'):
+            if key in data:
+                result[key] = data[key]
         return result
 
 
