@@ -116,6 +116,7 @@ class RobocasaEvalRunner(BaseEvalRunner):
                  eval_shard_strategy: str = 'episode',
                  mixed_precision_dtype: str = 'bf16',
                  enable_mixed_precision_training: bool = True,
+                 llm_attn_implementation: str = None,
                  unnorm_key: str = 'robocasa_gr1_test',
                  output_dir: Optional[str] = None,
                  save_video: bool = True,
@@ -132,12 +133,16 @@ class RobocasaEvalRunner(BaseEvalRunner):
                  result_gpu_id: Optional[int] = None,
                  **kwargs):
         from fluxvla.engines import (build_dataset_from_cfg,
-                                     build_transform_from_cfg)
+                                     build_transform_from_cfg,
+                                     build_vla_from_cfg)
 
         self.device_id = overwatch.local_rank()
 
-        # Build model.
-        self.vla = self.build_eval_vla(cfg)
+        # Build model. OpenVLA robot evaluation uses FlashAttention 2 in the
+        # official inference path, while training uses SDPA.
+        model_cfg = self.prepare_eval_model_cfg(
+            cfg, llm_attn_implementation=llm_attn_implementation)
+        self.vla = build_vla_from_cfg(model_cfg).eval()
 
         # Load checkpoint weights.
         if ckpt_path is not None:
@@ -309,6 +314,7 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.eval_shard_strategy = eval_shard_strategy
         self.mixed_precision_dtype = str_to_dtype(mixed_precision_dtype)
         self.enable_mixed_precision_training = enable_mixed_precision_training
+        self.llm_attn_implementation = llm_attn_implementation
         self.unnorm_key = unnorm_key
         self.distributed_state = overwatch.distributed_state
 
@@ -396,7 +402,7 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.vla.freeze_llm_backbone = True
         self.vla.freeze_projector = True
         self.vla.freeze_vlm_backbone = True
-        self.vla.cuda(self.device_id)
+        self.move_eval_vla_to_device()
 
     @staticmethod
     def _format_duration(seconds: float) -> str:

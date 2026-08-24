@@ -22,6 +22,7 @@ import torch
 
 from fluxvla.engines.utils import initialize_overwatch
 from fluxvla.engines.utils.name_map import str_to_dtype
+from fluxvla.engines.utils.torch_utils import move_module_to_device
 
 overwatch = initialize_overwatch(__name__)
 
@@ -43,6 +44,18 @@ class BaseEvalRunner:
             return build_vla_from_cfg(cfg.inference_model).eval()
         return build_vla_from_cfg(cfg.model).eval()
 
+    def move_eval_vla_to_device(self) -> None:
+        """Place the eval model while preserving OpenVLA's FP32 RoPE state."""
+        dtype = (
+            self.mixed_precision_dtype
+            if self.enable_mixed_precision_training else None)
+        preserve_buffers = str(self.model_family).lower() == 'openvla'
+        self.vla = move_module_to_device(
+            self.vla,
+            device=self.device_id,
+            dtype=dtype,
+            preserve_float32_buffers=preserve_buffers)
+
     @staticmethod
     def _set_model_cfg_value(model_cfg, key: str, value) -> None:
         if isinstance(model_cfg, dict):
@@ -62,7 +75,8 @@ class BaseEvalRunner:
     def prepare_eval_model_cfg(cls,
                                cfg,
                                model_build_device: str = None,
-                               model_build_dtype=None):
+                               model_build_dtype=None,
+                               llm_attn_implementation: str = None):
         """Copy the eval model config and apply construction overrides."""
         if hasattr(cfg, 'inference_model'):
             model_cfg = copy.deepcopy(cfg.inference_model)
@@ -75,6 +89,16 @@ class BaseEvalRunner:
         resolved_dtype = cls._resolve_model_build_dtype(model_build_dtype)
         if resolved_dtype is not None:
             cls._set_model_cfg_value(model_cfg, 'torch_dtype', resolved_dtype)
+        if llm_attn_implementation is not None:
+            llm_backbone = model_cfg.get('llm_backbone')
+            if llm_backbone is None:
+                raise ValueError('llm_attn_implementation requires a model '
+                                 'with an llm_backbone config.')
+            llm_config = llm_backbone.get('llm_config')
+            if llm_config is None:
+                llm_config = {}
+                llm_backbone['llm_config'] = llm_config
+            llm_config['_attn_implementation'] = llm_attn_implementation
         return model_cfg
 
     @staticmethod

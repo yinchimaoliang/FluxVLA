@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -48,19 +48,40 @@ class HFCausalLLMBackbone(nn.Module):
             inference mode. Defaults to False.
     """
 
-    def __init__(self,
-                 llm_backbone_id: str,
-                 llm_family: str,
-                 llm_path: str = None,
-                 llm_config: Dict = None,
-                 llm_max_length: int = 2048,
-                 hf_token: Optional[str] = None,
-                 inference_mode: bool = False,
-                 trust_remote_code: bool = True) -> None:
+    def __init__(
+            self,
+            llm_backbone_id: str,
+            llm_family: str,
+            llm_path: str = None,
+            llm_config: Dict = None,
+            llm_max_length: int = 2048,
+            hf_token: Optional[str] = None,
+            inference_mode: bool = False,
+            trust_remote_code: bool = True,
+            torch_dtype: Optional[Union[str, torch.dtype]] = None) -> None:
         super().__init__()
         self.llm_family = llm_family
         self.llm_max_length = llm_max_length
         self.inference_mode = inference_mode
+        if isinstance(torch_dtype, str):
+            dtype_aliases = {
+                'bf16': torch.bfloat16,
+                'bfloat16': torch.bfloat16,
+                'fp16': torch.float16,
+                'float16': torch.float16,
+                'fp32': torch.float32,
+                'float32': torch.float32,
+            }
+            if torch_dtype not in dtype_aliases:
+                raise ValueError(f'Unsupported torch_dtype: {torch_dtype}')
+            torch_dtype = dtype_aliases[torch_dtype]
+        elif torch_dtype is not None and not isinstance(
+                torch_dtype, torch.dtype):
+            raise TypeError(
+                'torch_dtype must be a string, torch.dtype, or None')
+        model_kwargs = {}
+        if torch_dtype is not None:
+            model_kwargs['dtype'] = torch_dtype
 
         model_cls = LLM_BACKBONE_CONFIGS[llm_backbone_id]['model_cls']
         llm_cfg = LLM_BACKBONE_CONFIGS[llm_backbone_id]['config']
@@ -71,7 +92,7 @@ class HFCausalLLMBackbone(nn.Module):
         # more explicit about LLM-specific details
         if not self.inference_mode:
             overwatch.info(
-                f'Loading [bold]{llm_family}[/] LLM from [underline]`{llm_path}`[/]',  # noqa: E501
+                f'Loading [bold]{llm_family}[/] LLM from [underline]`{llm_path}`[/]',  # noqa: E501,W604
                 ctx_level=1)
             if llm_config is None:
                 llm_config = llm_cfg.from_pretrained(
@@ -83,26 +104,30 @@ class HFCausalLLMBackbone(nn.Module):
                 self.llm = model_cls.from_pretrained(
                     llm_path,
                     config=llm_config,
-                    trust_remote_code=trust_remote_code)
+                    trust_remote_code=trust_remote_code,
+                    **model_kwargs)
             else:
                 llm_config = llm_cfg(**llm_config)
                 if llm_path is not None:
                     self.llm = model_cls.from_pretrained(
                         llm_path,
                         config=llm_config,
-                        trust_remote_code=trust_remote_code)
+                        trust_remote_code=trust_remote_code,
+                        **model_kwargs)
                 else:
                     self.llm = model_cls(llm_config)
+                    if torch_dtype is not None:
+                        self.llm.to(dtype=torch_dtype)
 
         # [Contract] `inference_mode` means we're loading from a pretrained checkpoint;  # noqa: E501
         # no need to load base weights!
         else:
             overwatch.info(
-                f'Building empty [bold]{llm_family}[/] LLM from [underline]`{llm_path}`[/]',  # noqa: E501
+                f'Building empty [bold]{llm_family}[/] LLM from [underline]`{llm_path}`[/]',  # noqa: E501,W604
                 ctx_level=1)
             llm_config = AutoConfig.from_pretrained(
                 llm_path, token=hf_token, trust_remote_code=trust_remote_code)
-            self.llm = model_cls._from_config(llm_config)
+            self.llm = model_cls._from_config(llm_config, **model_kwargs)
 
         self.llm.config.use_cache = False if not self.inference_mode else True
         if not self.inference_mode:

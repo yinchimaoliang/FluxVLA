@@ -18,6 +18,7 @@ from typing import Callable, Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 # === Randomness ===
 
@@ -57,6 +58,36 @@ def configure_deterministic_training(enabled: bool,
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def move_module_to_device(module: nn.Module,
+                          device,
+                          dtype: Optional[torch.dtype] = None,
+                          preserve_float32_buffers: bool = False) -> nn.Module:
+    """Move a module without accidentally quantizing FP32 runtime buffers.
+
+    Hugging Face loads OpenVLA parameters in BF16 but leaves RoPE frequency
+    buffers in FP32. Calling ``module.to(dtype=torch.bfloat16)`` later also
+    casts those buffers and changes OpenVLA logits. Preserve their original
+    values when reproducing the official mixed-precision placement.
+    """
+    if dtype is None or not preserve_float32_buffers:
+        return module.to(device=device, dtype=dtype)
+
+    preserved_buffers = []
+    for submodule in module.modules():
+        for name, buffer in submodule.named_buffers(recurse=False):
+            if buffer is not None and buffer.dtype == torch.float32:
+                preserved_buffers.append((
+                    submodule,
+                    name,
+                    buffer.detach().to(device=device, copy=True),
+                ))
+
+    module.to(device=device, dtype=dtype)
+    for submodule, name, buffer in preserved_buffers:
+        submodule._buffers[name] = buffer
+    return module
 
 
 def configure_sdpa_backends_from_env(default: str = None) -> None:

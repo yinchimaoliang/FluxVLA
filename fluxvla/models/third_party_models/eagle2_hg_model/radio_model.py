@@ -178,20 +178,29 @@ def forward(self, x: torch.Tensor) -> torch.Tensor:
     return result
 
 
-def replace_vit_attn_with_flash_attn():
-    cuda_major, cuda_minor = torch.cuda.get_device_capability()
+def replace_vit_attn_with_flash_attn(model: nn.Module) -> None:
+    """Enable RADIO's FlashAttention implementation on one model instance.
+
+    Do not monkey-patch ``timm.models.vision_transformer.Attention`` at import
+    time. FluxVLA imports the Eagle/RADIO module while registering all model
+    families, so a class-level patch silently changed the attention kernel of
+    unrelated TIMM backbones such as OpenVLA's DINOv2 and SigLIP encoders.
+    """
+    cuda_major, _ = torch.cuda.get_device_capability()
     if cuda_major < 8:
         warnings.warn(
             'Flash attention is only supported on A100 or H100 GPU during training due to head dim > 64 backward.'  # noqa: E501
             'ref: https://github.com/HazyResearch/flash-attention/issues/190#issuecomment-1523359593'  # noqa: E501
         )
 
-    Attention.forward = forward
-    Attention.inner_attn = FlashAttention(attention_dropout=0.0)
-    Attention._flash_attn = _flash_attn
+    for module in model.modules():
+        if not isinstance(module, Attention):
+            continue
+        module.inner_attn = FlashAttention(attention_dropout=0.0)
+        module._flash_attn = MethodType(_flash_attn, module)
+        module.forward = MethodType(forward, module)
 
 
-replace_vit_attn_with_flash_attn()
 ####
 
 input_dim_t = Union[int, Tuple[int, int]]
@@ -836,6 +845,7 @@ def create_model_from_args(args) -> nn.Module:
         weight_init=weight_init,
         **args.model_kwargs,
     )
+    replace_vit_attn_with_flash_attn(model)
 
     if hasattr(model, 'norm') and not getattr(args, 'model_norm', False):
         model.norm = nn.Identity()

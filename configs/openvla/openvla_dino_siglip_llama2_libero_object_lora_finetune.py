@@ -35,9 +35,22 @@ model = dict(
         llm_family='llama',
         llm_path=  # noqa: E251
         './checkpoints/Llama-2-7b-hf',  # noqa: E501
+        # Match the sparse text_config stored by openvla/openvla-7b.
+        llm_config=dict(
+            vocab_size=32000,
+            hidden_size=4096,
+            intermediate_size=11008,
+            num_hidden_layers=32,
+            num_attention_heads=32,
+            num_key_value_heads=32,
+            max_position_embeddings=2048,
+            rms_norm_eps=1e-6,
+            torch_dtype='bfloat16',
+        ),
         llm_max_length=2048,
         hf_token=None,
         inference_mode=False,
+        torch_dtype='bfloat16',
         pad_token_id=32000),
     projector=dict(
         type='FusedMLPProjector', fused_vision_dim=2176, llm_dim=4096),
@@ -177,16 +190,9 @@ train_dataloader = dict(
                 ),
                 dict(
                     type='ResizeImagesLanczos',
-                    height=256,
-                    width=256,
-                    backend='tensorflow',
-                ),
-                dict(
-                    type='ResizeImagesLanczos',
                     height=224,
                     width=224,
                     backend='tensorflow',
-                    jpeg_roundtrip=True,
                 ),
                 dict(
                     type='AugImage',
@@ -203,10 +209,11 @@ train_dataloader = dict(
                 ),
                 dict(
                     type='NormalizeImages',
-                    means=[[123.515625, 116.04492188, 103.59375],
-                           [128, 128, 128]],
-                    stds=[[58.27148438, 57.02636719, 57.27539062],
-                          [128, 128, 128]],
+                    means=[[0.484375, 0.455078125, 0.40625], [0.5, 0.5, 0.5]],
+                    stds=[[0.228515625, 0.2236328125, 0.224609375],
+                          [0.5, 0.5, 0.5]],
+                    scale_to_unit_interval=True,
+                    normalization_epsilon=0.0,
                 ),
             ],
             action_window_size=1,
@@ -245,13 +252,15 @@ runner = dict(
     enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    # Match official OpenVLA: cast/place the base first, then create fp32 LoRA.
+    # Match official OpenVLA/PEFT 0.11.1: create bf16 LoRA on the bf16 base.
     lora_before_device_move=False,
+    lora_autocast_adapter_dtype=False,
     static_graph=False)
 
 eval = dict(
     type='LiberoEvalRunner',
     model_family='openvla',
+    llm_attn_implementation='flash_attention_2',
     task_suite_name='libero_object',
     dataset=dict(
         type='LiberoParquetEvalDataset',
@@ -267,9 +276,11 @@ eval = dict(
                 type='TransformImage',
                 image_resize_strategy='resize-naive',
                 input_sizes=[[3, 224, 224], [3, 224, 224]],
-                means=[[123.515625, 116.04492188, 103.59375], [128, 128, 128]],
-                stds=[[58.27148438, 57.02636719, 57.27539062], [128, 128,
-                                                                128]],
+                interpolations=['bicubic', 'bicubic'],
+                means=[[0.484375, 0.455078125, 0.40625], [0.5, 0.5, 0.5]],
+                stds=[[0.228515625, 0.2236328125, 0.224609375],
+                      [0.5, 0.5, 0.5]],
+                scale_to_unit_interval=True,
             ),
             dict(
                 type='LiberoPromptFromInputs',

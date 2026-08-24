@@ -1269,6 +1269,10 @@ class NormalizeImages:
             where each element is a list of means for each channel.
         stds (List): List of standard deviations for normalization,
             where each element is a list of stds for each channel.
+        preserve_leading_dims (bool): Preserve all dimensions before CHW.
+        scale_to_unit_interval (bool): Divide pixels by 255 before
+            normalization, matching torchvision ``ToTensor``.
+        normalization_epsilon (float): Value added to each standard deviation.
     """
 
     def __init__(self,
@@ -1276,17 +1280,16 @@ class NormalizeImages:
                  stds: List,
                  preserve_leading_dims: bool = False,
                  scale_to_unit_interval: bool = False,
+                 normalization_epsilon: float = 1e-8,
                  *args,
                  **kwargs):
         self.means = np.asarray(means, dtype=np.float32)
         self.stds = np.asarray(stds, dtype=np.float32)
         self.preserve_leading_dims = preserve_leading_dims
         self.scale_to_unit_interval = scale_to_unit_interval
+        self.normalization_epsilon = normalization_epsilon
 
     def _normalize_flat_images(self, flat_images: np.ndarray) -> np.ndarray:
-        if self.scale_to_unit_interval:
-            flat_images = flat_images / 255.0
-
         means = self.means
         stds = self.stds
         if means.ndim == 1:
@@ -1303,10 +1306,27 @@ class NormalizeImages:
                 'Means/stds must have length 1 or match the number '
                 'of images after flattening.')
 
+        if self.scale_to_unit_interval:
+            # Official OpenVLA applies torchvision ToTensor and Normalize
+            # after RLDS image augmentation. Keep the arithmetic in Torch so
+            # the resulting float32 pixels are bitwise identical.
+            images_tensor = torch.from_numpy(
+                np.ascontiguousarray(flat_images)).to(torch.float32).div(255)
+            means_tensor = torch.from_numpy(np.ascontiguousarray(means))[:, :,
+                                                                         None,
+                                                                         None]
+            stds_tensor = torch.from_numpy(np.ascontiguousarray(stds))[:, :,
+                                                                       None,
+                                                                       None]
+            if self.normalization_epsilon:
+                stds_tensor = stds_tensor.add(self.normalization_epsilon)
+            return images_tensor.sub(means_tensor).div(stds_tensor).numpy()
+
         normalized_images = []
         for idx, image in enumerate(flat_images):
-            normalized_images.append((image - means[idx][:, None, None]) /
-                                     (stds[idx][:, None, None] + 1e-8))
+            normalized_images.append(
+                (image - means[idx][:, None, None]) /
+                (stds[idx][:, None, None] + self.normalization_epsilon))
         return np.stack(normalized_images, axis=0)
 
     def __call__(self, data: dict):
@@ -1455,6 +1475,10 @@ class TransformImage:
         stds (Optional[List[Tuple[float, float, float]]]): List of
             standard deviations for normalization,
             where each std is a tuple of (std_r, std_g, std_b).
+        interpolations (Optional[List[str]]): Resize interpolation for each
+            vision backbone. Supports bilinear, bicubic, and lanczos.
+        scale_to_unit_interval (bool): Apply torchvision-compatible uint8 to
+            float scaling before normalization.
         letterbox_fill (Optional[List[int]]): RGB fill color used for
             letterbox padding. The transform stores this as a list and
             converts it only at the PIL call site.
@@ -1469,6 +1493,8 @@ class TransformImage:
         input_sizes: Optional[List[Tuple[int, int, int]]] = None,
         means: Optional[List[Tuple[float, float, float]]] = None,
         stds: Optional[List[Tuple[float, float, float]]] = None,
+        interpolations: Optional[List[str]] = None,
+        scale_to_unit_interval: bool = False,
         letterbox_fill: Optional[List[int]] = None,
         letterbox_pad_position: Optional[str] = None,
         **kwargs: str,
@@ -1480,10 +1506,15 @@ class TransformImage:
         input_sizes = [(3, 224, 224)] if input_sizes is None else input_sizes
         means = [(0.5, 0.5, 0.5)] if means is None else means
         stds = [(0.5, 0.5, 0.5)] if stds is None else stds
-        assert len(input_sizes) == len(means) == len(stds), \
+        interpolations = (['bilinear'] * len(input_sizes)
+                          if interpolations is None else interpolations)
+        assert len(input_sizes) == len(means) == len(stds) == len(
+            interpolations), \
             'Input sizes, means, and stds must have the same length.'
         # Set parameters
         self.input_sizes, self.means, self.stds = input_sizes, means, stds  # noqa: E501
+        self.interpolations = interpolations
+        self.scale_to_unit_interval = scale_to_unit_interval
 
         # Initialize the parameters for transformations
         self.resize_params = list()
@@ -1498,9 +1529,17 @@ class TransformImage:
         self.letterbox_pad_position = letterbox_pad_position
 
         for idx in range(len(input_sizes)):
+            interpolation = {
+                'bilinear': Image.Resampling.BILINEAR,
+                'bicubic': Image.Resampling.BICUBIC,
+                'lanczos': Image.Resampling.LANCZOS,
+            }.get(str(interpolations[idx]).lower())
+            if interpolation is None:
+                raise ValueError(
+                    f'Unsupported interpolation: {interpolations[idx]}')
             self.resize_params.append({
                 'size': input_sizes[idx][-2:],
-                'interpolation': 'bilinear'
+                'interpolation': interpolation
             })
             self.crop_params.append({'output_size': input_sizes[idx][-2:]})
             self.normalize_params.append({
@@ -1545,13 +1584,13 @@ class TransformImage:
         if self.image_resize_strategy == 'resize-naive':
             # Resize without keeping the aspect ratio (naive resize)
             img_resized = img.resize(resize_param['size'],
-                                     Image.Resampling.BILINEAR)
+                                     resize_param['interpolation'])
         else:
             if self.do_letterbox:
                 img = self.letterbox_pad_transform(img, self.letterbox_fill)
             # Resize the image
             img_resized = img.resize(resize_param['size'],
-                                     Image.Resampling.BILINEAR)
+                                     resize_param['interpolation'])
 
         # Center crop
         left = (img_resized.width - crop_param['output_size'][0]) // 2
@@ -1560,11 +1599,22 @@ class TransformImage:
             (left, top, left + crop_param['output_size'][0],
              top + crop_param['output_size'][1]))
 
-        # Convert to numpy array (ToTensor equivalent)
-        img_np = np.array(img_cropped).astype(np.float32)
-
-        # Normalize
+        img_np = np.array(img_cropped)
         mean, std = normalize_param['mean'], normalize_param['std']
+        if self.scale_to_unit_interval:
+            # Match torchvision's ToTensor -> Normalize arithmetic exactly.
+            # Performing these operations in NumPy and converting afterwards
+            # changes a few float32 values by one ULP.
+            img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
+            img_tensor = img_tensor.to(torch.float32).div(255)
+            mean_tensor = torch.as_tensor(
+                mean, dtype=torch.float32)[:, None, None]
+            std_tensor = torch.as_tensor(
+                std, dtype=torch.float32)[:, None, None]
+            return img_tensor.sub(mean_tensor).div(std_tensor).numpy()
+
+        # Preserve the legacy pixel-space normalization path.
+        img_np = img_np.astype(np.float32)
         img_np = (img_np - mean) / std
         return img_np.transpose(2, 0, 1)  # Convert to (C, H, W) format
 

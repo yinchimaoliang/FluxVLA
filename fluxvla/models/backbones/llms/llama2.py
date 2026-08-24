@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict, Sequence, Type
+from typing import Dict, Optional, Sequence, Type, Union
 
 import torch
 import torch.nn as nn
@@ -45,16 +45,18 @@ class LLaMa2LLMBackbone(HFCausalLLMBackbone):
             vocabulary. Defaults to 32000.
     """
 
-    def __init__(self,
-                 llm_backbone_id: str,
-                 llm_family: str,
-                 llm_path: str,
-                 llm_config: Dict = None,
-                 llm_max_length: int = 2048,
-                 hf_token: str = None,
-                 inference_mode: bool = False,
-                 pad_token_id: int = 0,
-                 tokenizer_length: int = 32001) -> None:
+    def __init__(
+            self,
+            llm_backbone_id: str,
+            llm_family: str,
+            llm_path: str,
+            llm_config: Dict = None,
+            llm_max_length: int = 2048,
+            hf_token: str = None,
+            inference_mode: bool = False,
+            pad_token_id: int = 0,
+            tokenizer_length: int = 32001,
+            torch_dtype: Optional[Union[str, torch.dtype]] = None) -> None:
         super().__init__(
             llm_backbone_id,
             llm_family=llm_family,
@@ -62,7 +64,8 @@ class LLaMa2LLMBackbone(HFCausalLLMBackbone):
             llm_config=llm_config,
             llm_max_length=llm_max_length,
             hf_token=hf_token,
-            inference_mode=inference_mode)
+            inference_mode=inference_mode,
+            torch_dtype=torch_dtype)
 
         # Add a PAD token explicitly for LLaMa-2
 

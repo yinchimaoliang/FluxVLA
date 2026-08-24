@@ -184,7 +184,7 @@ class LiberoEvalRunner(BaseEvalRunner):
                              f'{resolved}')
         invalid = [task for task in resolved if task < 0 or task >= num_tasks]
         if invalid:
-            raise ValueError(f'Invalid task ids {invalid}; expected range [0, '
+            raise ValueError(f'Invalid task ids {invalid}. Expected range [0, '
                              f'{num_tasks - 1}].')
         return resolved
 
@@ -392,6 +392,7 @@ class LiberoEvalRunner(BaseEvalRunner):
                  allowed_missing_key_prefixes: tuple = (),
                  model_build_device: str = None,
                  model_build_dtype: str = None,
+                 llm_attn_implementation: str = None,
                  eval_shard_strategy: str = 'episode',
                  preprocess_every_step: bool = True,
                  save_rollout_videos: bool = True,
@@ -416,7 +417,8 @@ class LiberoEvalRunner(BaseEvalRunner):
         model_cfg = self.prepare_eval_model_cfg(
             cfg,
             model_build_device=model_build_device,
-            model_build_dtype=model_build_dtype)
+            model_build_dtype=model_build_dtype,
+            llm_attn_implementation=llm_attn_implementation)
         self.vla = build_vla_from_cfg(model_cfg).eval()
         # Load checkpoint weights if ckpt_path is provided
         if ckpt_path is not None:
@@ -483,6 +485,7 @@ class LiberoEvalRunner(BaseEvalRunner):
         self.model_build_device = model_build_device
         self.model_build_dtype = self._resolve_model_build_dtype(
             model_build_dtype)
+        self.llm_attn_implementation = llm_attn_implementation
         self.eval_shard_strategy = str(eval_shard_strategy).lower()
         if (self.eval_shard_strategy == 'task'
                 and os.environ.get(LIBERO_TASK_SHARDING_ALLOWED_ENV) != '1'):
@@ -520,11 +523,7 @@ class LiberoEvalRunner(BaseEvalRunner):
         self.vla.freeze_llm_backbone = True
         self.vla.freeze_projector = True
         self.vla.freeze_vlm_backbone = True
-        if self.enable_mixed_precision_training:
-            self.vla.to(
-                device=self.device_id, dtype=self.mixed_precision_dtype)
-        else:
-            self.vla.cuda(self.device_id)
+        self.move_eval_vla_to_device()
 
     def cleanup(self) -> None:
         """Release per-suite evaluation resources before the next suite."""
@@ -812,15 +811,16 @@ class LiberoEvalRunner(BaseEvalRunner):
                         display_success_count / max(display_episode_count, 1) *
                         100)
                     pbar_delta = max(display_episode_count - pbar.n, 0)
-                    overwatch.info('[eval-progress] '
-                                   f'episodes={display_episode_count}/'
-                                   f'{total_eval_episodes} '
-                                   f'successes={display_success_count} '
-                                   f'success_rate={display_success_rate:.2f}%')
+                    overwatch.info(
+                        '[eval-progress] '
+                        f'episodes={display_episode_count}/'
+                        f'{total_eval_episodes} '
+                        f'successes={display_success_count} '
+                        'success_rate={:.2f}%'.format(display_success_rate))
                     pbar.set_postfix(
                         successes=display_success_count,
                         episodes=display_episode_count,
-                        success_rate=f'{display_success_rate:.1f}%')
+                        success_rate='{:.1f}%'.format(display_success_rate))
                     if pbar_delta > 0:
                         pbar.update(pbar_delta)
 
@@ -832,7 +832,7 @@ class LiberoEvalRunner(BaseEvalRunner):
                 log_file.write('# local episodes completed so far: '
                                f'{rank_episode_count}\n')
                 success_log = (f'# local successes: {rank_success_count} '
-                               f'({rank_success_rate:.1f}%)\n')
+                               '({:.1f}%)\n'.format(rank_success_rate))
                 log_file.write(success_log)
                 log_file.flush()
         finally:
@@ -861,7 +861,7 @@ class LiberoEvalRunner(BaseEvalRunner):
         if rank == 0:
             overwatch.info(f'# episodes completed: {global_episode_count}')
             overwatch.info(f'# successes: {global_success_count} '
-                           f'({global_success_rate:.1f}%)')
+                           '({:.1f}%)'.format(global_success_rate))
             summary_path = os.path.join(self.run_dir, 'summary.txt')
             with open(summary_path, 'w') as sf:
                 sf.write(f'task_suite: {self.task_suite_name}\n')
@@ -902,11 +902,11 @@ class LiberoEvalRunner(BaseEvalRunner):
         """Human-readable duration for summary files."""
         seconds = int(round(seconds))
         if seconds < 60:
-            return f'{seconds:02d}s'
+            return '{:02d}s'.format(seconds)
         if seconds < 3600:
-            return f'{seconds // 60:02d}m{seconds % 60:02d}s'
+            return '{:02d}m{:02d}s'.format(seconds // 60, seconds % 60)
         hours, rem = divmod(seconds, 3600)
-        return f'{hours:02d}h{rem // 60:02d}m{rem % 60:02d}s'
+        return '{:02d}h{:02d}m{:02d}s'.format(hours, rem // 60, rem % 60)
 
     def _write_libero_summary_artifacts(self, task_suite, num_tasks,
                                         task_successes, task_episodes,
@@ -998,7 +998,7 @@ class LiberoEvalRunner(BaseEvalRunner):
                           if start_ts != float('inf') else f'SUCCESS|{succ}|'
                           f'{eps}|0')
             overwatch.info(f'Task {task_id} completed: {succ}/{eps} successes')
-            overwatch.info(f'Time taken: {dur:.2f} seconds')
+            overwatch.info('Time taken: {:.2f} seconds'.format(dur))
             ordered_task_ids.append(task_id)
             total_successes += succ
             total_trials += eps
@@ -1017,11 +1017,11 @@ class LiberoEvalRunner(BaseEvalRunner):
         summary_path = os.path.join(self.run_dir, 'summary.txt')
         with open(summary_path, 'a') as sf:
             sf.write('\n=== Evaluation Results Summary ===\n')
-            sf.write(f'\n{suite}:\n')
+            sf.write('\n{}:\n'.format(suite))
             sf.write(f'- Tasks completed: {completed_tasks}\n')
             sf.write(f'- Total attempts: {total_trials}\n')
             sf.write(f'- Successful attempts: {total_successes}\n')
-            sf.write(f'- Success rate: {suite_success_rate:.2f}%\n')
+            sf.write('- Success rate: {:.2f}%\n'.format(suite_success_rate))
             sf.write(f'- Total time: {self._format_duration(total_time)}\n')
             sf.write('- Average time per task: '
                      f'{self._format_duration(avg_time)}\n')
@@ -1033,11 +1033,13 @@ class LiberoEvalRunner(BaseEvalRunner):
         summary_csv = os.path.join(self.run_dir, 'summary.csv')
         with open(summary_csv, 'w') as f:
             f.write(f'{title}\n')
-            f.write(f',{suite},Overall\n')
+            f.write(',{},Overall\n'.format(suite))
             f.write('Success Rate (%),'
-                    f'{suite_success_rate:.2f},{suite_success_rate:.2f}\n')
-            f.write(f'Average Time (s),{avg_time:.2f},{avg_time:.2f}\n')
-            f.write(f'Max Time (s),{max_time:.2f},{max_time:.2f}\n')
+                    '{:.2f},{:.2f}\n'.format(suite_success_rate,
+                                             suite_success_rate))
+            f.write('Average Time (s),{:.2f},{:.2f}\n'.format(
+                avg_time, avg_time))
+            f.write('Max Time (s),{:.2f},{:.2f}\n'.format(max_time, max_time))
 
         # task_success_rates.csv -- one row per task, ordered by task id.
         task_csv = os.path.join(self.run_dir, 'task_success_rates.csv')
