@@ -4,13 +4,11 @@
 # Upstream-Ref: main
 # SPDX-License-Identifier: MIT
 # Notes: Attribution normalized; no functional change.
-import inspect
 import os
 from collections import deque
 from pathlib import Path
 from typing import Dict, Optional
 
-import peft
 import torch
 import wandb
 from peft import LoraConfig, PeftModel, get_peft_model
@@ -48,51 +46,11 @@ def _resolve_lora_before_device_move(cfg: Dict,
     return _config_value(model_cfg, 'type') != 'OpenVLA'
 
 
-def _resolve_lora_autocast_adapter_dtype(
-        cfg: Dict, configured: Optional[bool]) -> Optional[bool]:
-    """Resolve PEFT adapter autocasting without changing other recipes.
-
-    OpenVLA pins PEFT 0.11.1, where LoRA layers inherit the bf16 base weight
-    dtype. Newer PEFT releases default to promoting bf16 adapters to fp32.
-    Disable that new behavior for OpenVLA while leaving other model families
-    on their installed PEFT default unless explicitly configured.
-    """
-    if configured is not None:
-        return configured
-    model_cfg = _config_value(cfg, 'model', {})
-    if _config_value(model_cfg, 'type') == 'OpenVLA':
-        return False
-    return None
-
-
-def _get_peft_model_compat(model: torch.nn.Module, lora_config: LoraConfig,
-                           autocast_adapter_dtype: Optional[bool]):
-    """Create a PEFT model with version-compatible adapter dtype behavior."""
-    parameters = inspect.signature(get_peft_model).parameters
-    if ('autocast_adapter_dtype' in parameters
-            and autocast_adapter_dtype is not None):
-        return get_peft_model(
-            model, lora_config, autocast_adapter_dtype=autocast_adapter_dtype)
-
-    if autocast_adapter_dtype is True:
-        raise RuntimeError('The installed PEFT version does not support '
-                           '`autocast_adapter_dtype=True`.')
-    return get_peft_model(model, lora_config)
-
-
-def _load_peft_model_compat(model: torch.nn.Module, model_id: str,
-                            autocast_adapter_dtype: Optional[bool]):
-    """Load adapters with the same dtype policy used during training."""
-    parameters = inspect.signature(PeftModel.from_pretrained).parameters
-    if ('autocast_adapter_dtype' in parameters
-            and autocast_adapter_dtype is not None):
-        return PeftModel.from_pretrained(
-            model, model_id, autocast_adapter_dtype=autocast_adapter_dtype)
-
-    if autocast_adapter_dtype is True:
-        raise RuntimeError('The installed PEFT version does not support '
-                           '`autocast_adapter_dtype=True`.')
-    return PeftModel.from_pretrained(model, model_id)
+def _peft_kwargs(model_type: str) -> Dict:
+    """Return the fixed PEFT policy required by OpenVLA."""
+    if model_type == 'OpenVLA':
+        return {'autocast_adapter_dtype': False}
+    return {}
 
 
 def _trainable_parameter_dtype_counts(model: torch.nn.Module) -> Dict:
@@ -123,21 +81,15 @@ def _collect_output_embedding_ids(model: torch.nn.Module) -> set:
 
 def _resolve_lora_target_modules(model: torch.nn.Module,
                                  target_modules,
-                                 peft_011_compat: bool = False):
+                                 openvla_aligned: bool = False):
     if not (isinstance(target_modules, str)
             and target_modules.lower() == _ALL_LINEAR_TARGET):
         return target_modules
 
-    output_embedding_ids = _collect_output_embedding_ids(model)
     linear_classes = (torch.nn.Linear, Conv1D)
-    if peft_011_compat:
-        # PEFT 0.11.1 first reduced all linear module paths to their leaf
-        # names, then used suffix matching when applying LoRA. For OpenVLA,
-        # that behavior also selected the two ``patch_embed.proj`` Conv2d
-        # layers and, due to the old output-head exclusion logic, ``lm_head``.
-        # Reproduce the resulting module set explicitly on newer PEFT without
-        # relying on ambiguous suffix matching (notably numeric projector
-        # layer names in FluxVLA).
+    if openvla_aligned:
+        # Match the official OpenVLA target set: all linear layers, lm_head,
+        # and the two vision patch-embedding projections.
         linear_suffixes = {
             name.rsplit('.', 1)[-1]
             for name, module in model.named_modules()
@@ -150,6 +102,7 @@ def _resolve_lora_target_modules(model: torch.nn.Module,
             and name.rsplit('.', 1)[-1] in linear_suffixes
         ]
     else:
+        output_embedding_ids = _collect_output_embedding_ids(model)
         target_module_names = [
             name for name, module in model.named_modules()
             if isinstance(module, linear_classes)
@@ -224,7 +177,6 @@ class DDPTrainRunner(BaseTrainRunner):
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
                  lora_before_device_move: Optional[bool] = None,
-                 lora_autocast_adapter_dtype: Optional[bool] = None,
                  static_graph: bool = True,
                  **kwargs) -> None:
 
@@ -263,9 +215,6 @@ class DDPTrainRunner(BaseTrainRunner):
         self.max_grad_norm = max_grad_norm
         self.lora_before_device_move = _resolve_lora_before_device_move(
             cfg, lora_before_device_move)
-        self.lora_autocast_adapter_dtype = (
-            _resolve_lora_autocast_adapter_dtype(cfg,
-                                                 lora_autocast_adapter_dtype))
         self.static_graph = static_graph
         self.distributed_state = overwatch.distributed_state
         self.recent_losses = deque(maxlen=self.grad_accumulation_steps)
@@ -317,7 +266,7 @@ class DDPTrainRunner(BaseTrainRunner):
         target_modules = _resolve_lora_target_modules(
             self.vla,
             self.cfg.model.lora_target_modules,
-            peft_011_compat=model_type == 'OpenVLA')
+            openvla_aligned=model_type == 'OpenVLA')
         lora_config = LoraConfig(
             r=self.cfg.model.lora_rank,
             lora_alpha=lora_alpha,
@@ -326,8 +275,8 @@ class DDPTrainRunner(BaseTrainRunner):
             modules_to_save=modules_to_save,
             init_lora_weights='gaussian',
         )
-        self.vla = _get_peft_model_compat(self.vla, lora_config,
-                                          self.lora_autocast_adapter_dtype)
+        self.vla = get_peft_model(self.vla, lora_config,
+                                  **_peft_kwargs(model_type))
         self.vla.print_trainable_parameters()
 
     def _log_and_validate_trainable_dtypes(self) -> None:
@@ -351,17 +300,14 @@ class DDPTrainRunner(BaseTrainRunner):
                 raise RuntimeError(
                     'OpenVLA LoRA setup produced no trainable adapter weights.'
                 )
-            expected_dtype = (
-                torch.float32 if self.lora_autocast_adapter_dtype else
-                self.mixed_precision_dtype)
+            expected_dtype = self.mixed_precision_dtype
             if lora_dtypes != {expected_dtype}:
                 raise RuntimeError(
                     'OpenVLA LoRA adapter dtype does not match the configured '
                     'official-compatibility behavior. Expected '
                     f'{expected_dtype}, but found '
                     f'{sorted(map(str, lora_dtypes))}. '
-                    'Set `lora_autocast_adapter_dtype=False` to match PEFT '
-                    '0.11.1 used by the official OpenVLA recipe.')
+                    'OpenVLA LoRA adapters must inherit the BF16 base dtype.')
 
     def run_setup(self, n_train_examples: int) -> None:
         """Setup DDP-specific model configuration and distributed training."""
@@ -373,11 +319,6 @@ class DDPTrainRunner(BaseTrainRunner):
         self.vla.from_pretrained()
 
         use_lora = self._model_uses_lora()
-        if overwatch.is_rank_zero() and use_lora:
-            overwatch.info('PEFT version and adapter dtype policy: '
-                           f'version={peft.__version__}, '
-                           'autocast_adapter_dtype='
-                           f'{self.lora_autocast_adapter_dtype}')
         if use_lora and self.lora_before_device_move:
             self._apply_lora()
 
@@ -532,8 +473,8 @@ class DDPTrainRunner(BaseTrainRunner):
                         device='cpu',
                         dtype=self.mixed_precision_dtype,
                         preserve_float32_buffers=True)
-                merged_vla = _load_peft_model_compat(
-                    base_vla, save_dir, self.lora_autocast_adapter_dtype)
+                merged_vla = PeftModel.from_pretrained(
+                    base_vla, save_dir, **_peft_kwargs(model_type))
                 merged_vla = merged_vla.merge_and_unload()
                 model_state_dict = merged_vla.state_dict()
             else:

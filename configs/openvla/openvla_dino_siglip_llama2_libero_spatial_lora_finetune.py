@@ -254,7 +254,6 @@ runner = dict(
     mixed_precision_dtype='bf16',
     # Match official OpenVLA/PEFT 0.11.1: create bf16 LoRA on the bf16 base.
     lora_before_device_move=False,
-    lora_autocast_adapter_dtype=False,
     static_graph=False)
 
 eval = dict(
