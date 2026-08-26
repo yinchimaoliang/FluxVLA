@@ -138,7 +138,7 @@ def _robocasa_task_env(task_name):
 
 
 train_dataloader = dict(
-    # With 16 GPUs and eight accumulation steps this gives global batch 256.
+    # With 16 GPUs and no gradient accumulation this gives global batch 32.
     per_device_batch_size=2,
     per_device_num_workers=4,
     dataset=dict(
@@ -215,7 +215,7 @@ runner = dict(
     type='FSDPTrainRunner',
     max_epochs=None,
     max_steps=100000,
-    grad_accumulation_steps=8,
+    grad_accumulation_steps=1,
     optimizer=dict(lr=1e-5, type='AdamW', weight_decay=1e-5),
     max_grad_norm=1.0,
     save_epoch_interval=1,
@@ -241,7 +241,7 @@ runner = dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
-        grad_accumulation_steps=8,
+        grad_accumulation_steps=1,
         window_size=1,
     ),
     lr_scheduler=dict(
