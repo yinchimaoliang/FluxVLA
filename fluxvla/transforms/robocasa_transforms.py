@@ -532,6 +532,13 @@ class RobocasaEvalDataset:
             lang_masks=torch.tensor(token_mask).unsqueeze(0).cuda(),
         )
 
+        # Qwen-VL image processors return flattened visual patches together
+        # with the original temporal/height/width grid. Preserve that metadata
+        # for VLM backbones that cannot infer it from flattened inputs.
+        if data.get('image_grid_thw', None) is not None:
+            image_grid_thw = torch.as_tensor(data['image_grid_thw'])
+            batch['image_grid_thw'] = image_grid_thw.cuda().unsqueeze(0)
+
         if 'states' in data:
             batch['states'] = torch.from_numpy(
                 data['states']).bfloat16().cuda().unsqueeze(0)
