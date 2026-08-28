@@ -123,18 +123,6 @@ class LiberoEvalRunner(BaseEvalRunner):
     """
 
     @staticmethod
-    def _inject_checkpoint_tokenizer(dataset: Dict, ckpt_path: str) -> None:
-        model_path = Path(ckpt_path).resolve().parent.parent
-        tokenizer_path = model_path / 'tokenizer'
-        if not tokenizer_path.is_dir():
-            return
-
-        for transform in dataset.get('transforms', []):
-            tokenizer = transform.get('tokenizer')
-            if isinstance(tokenizer, dict):
-                tokenizer['model_path'] = tokenizer_path.as_posix()
-
-    @staticmethod
     def _build_global_episodes(num_tasks: int,
                                num_trials_per_task: int,
                                task_ids=None) -> list:

@@ -83,6 +83,19 @@ class BaseEvalRunner:
         return os.path.join(
             Path(ckpt_path).resolve().parent.parent, 'dataset_statistics.json')
 
+    @staticmethod
+    def _inject_checkpoint_tokenizer(dataset: Dict, ckpt_path: str) -> None:
+        """Use the tokenizer saved alongside the training checkpoints."""
+        work_dir = Path(ckpt_path).resolve().parent.parent
+        tokenizer_path = work_dir / 'tokenizer'
+        if not tokenizer_path.is_dir():
+            return
+
+        for transform in dataset.get('transforms', []):
+            tokenizer = transform.get('tokenizer')
+            if isinstance(tokenizer, dict):
+                tokenizer['model_path'] = tokenizer_path.as_posix()
+
     def load_eval_state_dict(
         self, state_dict: Dict,
         allowed_missing_key_prefixes=()) -> None:  # noqa: E125

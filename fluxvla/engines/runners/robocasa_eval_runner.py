@@ -234,6 +234,7 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.grouped_norm_stats = grouped_norm_stats
         self.norm_stats_group_names = norm_stats_group_names or []
         work_dir = Path(self.ckpt_path).resolve().parent.parent
+        self._inject_checkpoint_tokenizer(dataset, ckpt_path)
 
         # Statistics can come from an explicit path, a default file, or groups.
         if norm_stats_path is not None and self.grouped_norm_stats:
