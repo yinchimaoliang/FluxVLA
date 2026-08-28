@@ -28,8 +28,11 @@ Example for two 8-GPU nodes:
         work_dirs/gr00t_qwen3vl_0.6b_robocasa_full_data_full_finetune
 """
 
-_QWEN3VL_VLA_CKPT = './checkpoints/gr00t_qwen3vl_0.6b_libero'
-_QWEN3VL_TOKENIZER = _QWEN3VL_VLA_CKPT + '/tokenizer/'
+_QWEN3VL_VLA_ROOT = './checkpoints/gr00t_qwen3vl_0.6b_libero'
+_QWEN3VL_VLA_CKPT = (
+    _QWEN3VL_VLA_ROOT +
+    '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
+_QWEN3VL_TOKENIZER = _QWEN3VL_VLA_ROOT + '/tokenizer/'
 
 _QWEN3VL_VLM_CONFIG = dict(
     architectures=['Qwen3VLAForConditionalGeneration'],
@@ -352,7 +355,7 @@ eval = dict(
                 type='LiberoPromptFromInputs',
                 tokenizer=dict(
                     type='PretrainedTokenizer',
-                    model_path=_QWEN3VL_VLA_CKPT,
+                    model_path=_QWEN3VL_TOKENIZER,
                 )),
         ]),
     denormalize_action=dict(

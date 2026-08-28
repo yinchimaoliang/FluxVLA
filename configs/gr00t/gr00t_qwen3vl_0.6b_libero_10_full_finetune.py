@@ -15,7 +15,11 @@
 # GR00T VLA: Qwen3-0.6B LLM + Qwen3-VL 2B Vision
 #               + linear projection 1024->2048.
 
-_qwen3vl_vla_ckpt = './checkpoints/gr00t_qwen3vl_0.6b_libero'
+_qwen3vl_vla_root = './checkpoints/gr00t_qwen3vl_0.6b_libero'
+_qwen3vl_vla_ckpt = (
+    _qwen3vl_vla_root +
+    '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
+_qwen3vl_tokenizer = _qwen3vl_vla_root + '/tokenizer/'
 _qwen3vl_vlm_config = dict(
     architectures=['Qwen3VLAForConditionalGeneration'],
     dtype='bfloat16',
@@ -275,9 +279,7 @@ train_dataloader = dict(
                     type='ProcessPrompts',
                     tokenizer=dict(
                         type='PretrainedTokenizer',
-                        model_path=  # noqa: E251
-                        './checkpoints/gr00t_qwen3vl_0.6b_libero/tokenizer/',  # noqa: E501
-                    )),
+                        model_path=_qwen3vl_tokenizer)),
                 dict(type='ResizeImages', height=224, width=224),
                 dict(
                     type='QWen2VLImageTransform',
@@ -312,11 +314,7 @@ runner = dict(
     optimizer=dict(lr=1.5e-5, type='AdamW', weight_decay=0.0),
     max_grad_norm=1.0,
     sampler=None,
-    tokenizer=dict(
-        type='PretrainedTokenizer',
-        model_path=  # noqa: E251
-        './checkpoints/gr00t_qwen3vl_0.6b_libero/tokenizer/',  # noqa: E501
-    ),
+    tokenizer=dict(type='PretrainedTokenizer', model_path=_qwen3vl_tokenizer),
     collator=dict(
         type='DictCollator',
         keys=[
@@ -374,9 +372,7 @@ eval = dict(
                 type='LiberoPromptFromInputs',
                 tokenizer=dict(
                     type='PretrainedTokenizer',
-                    model_path=  # noqa: E251
-                    './checkpoints/gr00t_qwen3vl_0.6b_libero/',  # noqa: E501
-                )),
+                    model_path=_qwen3vl_tokenizer)),
             dict(
                 type='LiberoProprioFromInputs',
                 state_dim=64,
