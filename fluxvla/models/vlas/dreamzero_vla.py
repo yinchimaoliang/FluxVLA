@@ -365,7 +365,10 @@ class DreamZeroVLA(BaseVLA):
         if self.use_cache:
             head_kwargs['observed_latent_frames'] = observed_latent_frames
 
-        return self.vla_head.predict_action(**head_kwargs)
+        # RoboCasa consumes actions through NumPy, which does not support
+        # PyTorch bfloat16 tensors. Keep DreamZero inference in mixed
+        # precision, but expose actions through the common VLA API as float32.
+        return self.vla_head.predict_action(**head_kwargs).float()
 
     # ------------------------------------------------------------------
     # BaseVLA abstract method implementations

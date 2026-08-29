@@ -397,7 +397,17 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.vla.freeze_llm_backbone = True
         self.vla.freeze_projector = True
         self.vla.freeze_vlm_backbone = True
-        self.vla.cuda(self.device_id)
+        # Autocast only changes operation dtypes; it does not reduce the
+        # resident parameter memory.  Large policies such as DreamZero would
+        # otherwise be copied to CUDA in fp32 before the first forward and can
+        # OOM even when bf16 evaluation is enabled.  Match the LIBERO runner
+        # and move floating-point parameters directly to the requested mixed
+        # precision dtype.
+        if self.enable_mixed_precision_training:
+            self.vla.to(
+                device=self.device_id, dtype=self.mixed_precision_dtype)
+        else:
+            self.vla.cuda(self.device_id)
 
     @staticmethod
     def _format_duration(seconds: float) -> str:
