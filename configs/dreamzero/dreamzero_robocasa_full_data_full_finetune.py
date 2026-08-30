@@ -16,8 +16,9 @@
 The dataset layout, task list, fixed statistics asset, and closed-loop
 evaluation setup follow
 ``configs/pi05/pi05_paligemma_robocasa_full_data_full_finetune.py``. The
-DreamZero-specific video, tokenizer, model, and mean/std normalization settings
-follow the existing LIBERO DreamZero recipe.
+DreamZero-specific video, tokenizer, and model settings follow the existing
+LIBERO recipe. RoboCasa vector ordering, min-max normalization, augmentation,
+and classifier-free guidance follow the released DreamZero data contract.
 
 Example for two 8-GPU nodes sharing MASTER_ADDR and MASTER_PORT:
     torchrun --nnodes=2 --nproc_per_node=8 \
@@ -36,6 +37,13 @@ _TOKENIZER = _CKPT_ROOT + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
 # one two-frame dynamics block paired with a ten-step action chunk.
 _FRAME_WINDOW_SIZE = 9
 _NUM_VIEWS = 1
+_NEGATIVE_PROMPT = (
+    'Vibrant colors, overexposed, static, blurry details, text, subtitles, '
+    'style, artwork, painting, image, still, grayscale, dull, worst quality, '
+    'low quality, JPEG artifacts, ugly, mutilated, extra fingers, bad hands, '
+    'bad face, deformed, disfigured, mutated limbs, fused fingers, stagnant '
+    'image, cluttered background, three legs, many people in the background, '
+    'walking backwards.')
 
 model = dict(
     type='DreamZeroVLA',
@@ -83,7 +91,8 @@ model = dict(
         noise_s=0.999,
         num_inference_steps=16,
         use_gradient_checkpointing=True,
-        cfg_scale=1.0,
+        cfg_scale=5.0,
+        validate_action_range=True,
         max_chunk_size=-1,
     ),
     name_mapping={
@@ -173,6 +182,10 @@ train_dataloader = dict(
                     },
                     embodiment_id=0,
                 ),
+                dict(
+                    type='RobocasaGR1N15Bridge',
+                    apply_state_sincos=False,
+                ),
                 dict(type='ParquetPrompter', use_conversation=False),
                 dict(
                     type='ProcessPrompts',
@@ -182,18 +195,29 @@ train_dataloader = dict(
                     ),
                     max_len=512,
                 ),
-                # Keep temporal supervision geometrically consistent: unlike
-                # the single-frame PI0.5 recipe, do not independently crop or
-                # color-jitter each future video frame.
+                dict(
+                    type='RandomCropImages',
+                    scale=0.95,
+                    consistent=True,
+                ),
                 dict(type='ResizeImages', height=128, width=128),
+                dict(
+                    type='ColorJitterImages',
+                    brightness=0.3,
+                    contrast=0.4,
+                    saturation=0.5,
+                    hue=0.08,
+                    consistent=True,
+                ),
                 dict(type='SimpleNormalizeImages'),
                 dict(
                     type='NormalizeStatesAndActions',
                     action_dim=32,
-                    state_dim=32,
+                    state_dim=64,
                     state_key='proprio',
                     action_key='action',
-                    norm_type='mean_std',
+                    norm_type='min_max',
+                    clip_norm=True,
                 ),
                 dict(
                     type='PrepareVideo',
@@ -267,7 +291,7 @@ eval = dict(
     num_trials_per_task=20,
     seed=7,
     unnorm_key=_ROBOCASA_STATISTIC_NAME,
-    action_order='fluxvla',
+    action_order='n15',
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
     dataset=dict(
@@ -278,16 +302,22 @@ eval = dict(
                 type='ProcessRobocasaEvalInputs',
                 img_key='video.ego_view_bg_crop_pad_res256_freq20',
                 resize_size=128,
+                center_crop_scale=0.95,
                 normalize=True,
                 value_range='tanh',
                 embodiment_id=0,
             ),
             dict(
+                type='RobocasaGR1N15Bridge',
+                apply_state_sincos=False,
+            ),
+            dict(
                 type='NormalizeStatesAndActions',
-                state_dim=32,
+                state_dim=64,
                 state_key='proprio',
                 action_key='action',
-                norm_type='mean_std',
+                norm_type='min_max',
+                clip_norm=True,
             ),
             dict(type='ParquetPrompter', use_conversation=False),
             dict(
@@ -297,6 +327,7 @@ eval = dict(
                     model_path=_TOKENIZER,
                 ),
                 max_len=512,
+                negative_prompt=_NEGATIVE_PROMPT,
             ),
             dict(
                 type='PrepareVideo',
@@ -307,10 +338,10 @@ eval = dict(
     ),
     denormalize_action=dict(
         type='DenormalizeRobocasaAction',
-        norm_type='mean_std',
+        norm_type='min_max',
         action_dim=29,
         clip_actions=False,
-        stats_order='native',
+        stats_order='fluxvla',
     ),
 )
 

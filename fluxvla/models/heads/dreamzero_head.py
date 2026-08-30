@@ -124,6 +124,7 @@ class DreamZeroHead(nn.Module):
         pretrained_name_or_path: Optional[str] = None,
         use_gradient_checkpointing: bool = True,
         cfg_scale: float = 1.0,
+        validate_action_range: bool = False,
         max_chunk_size: int = -1,
         *args,
         **kwargs,
@@ -144,6 +145,7 @@ class DreamZeroHead(nn.Module):
         self.num_state_per_block = num_state_per_block
         self.use_cache = False
         self.cfg_scale = cfg_scale
+        self.validate_action_range = validate_action_range
         self.max_chunk_size = max_chunk_size
 
         # ----- build DiT model -----
@@ -256,6 +258,17 @@ class DreamZeroHead(nn.Module):
             dict with ``loss``, ``dynamics_loss``, ``action_loss``.
         """
         device = actions.device
+        if self.validate_action_range:
+            if not torch.isfinite(actions).all():
+                raise ValueError(
+                    'DreamZero actions contain non-finite values.')
+            action_min = actions.detach().amin().item()
+            action_max = actions.detach().amax().item()
+            if action_min < -1.00001 or action_max > 1.00001:
+                raise ValueError(
+                    'DreamZero expects actions normalized to [-1, 1], but '
+                    f'got [{action_min:.6g}, {action_max:.6g}]. Use clipped '
+                    'min-max or q01/q99 normalization.')
 
         # --- Flow-matching noise ---
         noise = torch.randn_like(latents)

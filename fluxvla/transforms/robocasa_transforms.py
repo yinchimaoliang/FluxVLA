@@ -87,24 +87,28 @@ def _robocasa_gr1_permutation(source_order: Dict[str, tuple]) -> List[int]:
 
 @TRANSFORMS.register_module()
 class RobocasaGR1N15Bridge:
-    """Align FluxVLA-converted RoboCasa GR1 vectors to official GR00T N1.5.
+    """Align FluxVLA-converted RoboCasa GR1 vectors to official N1.5 order.
 
     The current FluxVLA parquet/eval bridge stores GR1 vectors as
     left_arm + left_hand + right_arm + right_hand + waist. Official N1.5
-    `fourier_gr1_arms_waist` uses left_arm + right_arm + left_hand +
-    right_hand + waist, applies sin/cos to state, and min-max normalizes
-    action only. This transform performs the order conversion and state
-    encoding while also reordering flat action statistics.
+    RoboCasa uses left_arm + right_arm + left_hand + right_hand + waist.
+    GR00T's ``gr1_unified`` recipe additionally applies sin/cos to state,
+    while DreamZero's RoboCasa recipe keeps raw state and min-max normalizes
+    it. This transform supports both contracts and keeps flat state/action
+    statistics aligned with the reordered vectors.
 
     Args:
         source_order: Source flat vector order. Only ``fluxvla`` is supported.
         state_key: Key containing the state vector in the sample dict.
         action_key: Key containing the action window in the sample dict.
+        stats_state_key: State statistics key in ``data['stats']``.
         stats_action_key: Action statistics key in ``data['stats']``.
         apply_state_sincos: If True, encode states as sin/cos features.
         expand_state_axis: Optional singleton axis inserted after state
             conversion. DiT4DiT uses axis 0 to preserve one proprio token.
         reorder_actions: If True, reorder action vectors to N1.5 order.
+        reorder_state_stats: If True, reorder flat state statistics to N1.5
+            order. This is only applied to raw, non-sin/cos states.
         reorder_action_stats: If True, reorder flat action statistics to N1.5
             order so normalization matches reordered action dimensions.
     """
@@ -113,10 +117,12 @@ class RobocasaGR1N15Bridge:
                  source_order: str = 'fluxvla',
                  state_key: str = 'states',
                  action_key: str = 'actions',
+                 stats_state_key: str = 'proprio',
                  stats_action_key: str = 'action',
                  apply_state_sincos: bool = True,
                  expand_state_axis: Optional[int] = None,
                  reorder_actions: bool = True,
+                 reorder_state_stats: bool = True,
                  reorder_action_stats: bool = True):
         if source_order != 'fluxvla':
             raise ValueError(
@@ -124,10 +130,12 @@ class RobocasaGR1N15Bridge:
                 'Only the existing FluxVLA RoboCasa order is supported.')
         self.state_key = state_key
         self.action_key = action_key
+        self.stats_state_key = stats_state_key
         self.stats_action_key = stats_action_key
         self.apply_state_sincos = apply_state_sincos
         self.expand_state_axis = expand_state_axis
         self.reorder_actions = reorder_actions
+        self.reorder_state_stats = reorder_state_stats
         self.reorder_action_stats = reorder_action_stats
         self.permutation = np.array(
             _robocasa_gr1_permutation(ROBOCASA_GR1_FLUXVLA_ORDER),
@@ -154,21 +162,28 @@ class RobocasaGR1N15Bridge:
             encoded.extend([np.sin(group), np.cos(group)])
         return np.concatenate(encoded, axis=-1)
 
-    def _reorder_action_stats(self, data: Dict) -> None:
-        if not self.reorder_action_stats or 'stats' not in data:
+    def _reorder_stat_entry(self, stats: Dict, stats_key: str) -> None:
+        if stats_key not in stats:
             return
-        stats = copy.deepcopy(data['stats'])
-        if self.stats_action_key not in stats:
-            data['stats'] = stats
-            return
-        action_stats = stats[self.stats_action_key]
+        entry = stats[stats_key]
         for key in ('min', 'max', 'mean', 'std', 'q01', 'q99'):
-            values = action_stats.get(key)
+            values = entry.get(key)
             if values is None:
                 continue
             arr = np.asarray(values)
             if arr.shape[-1] == len(self.permutation):
-                action_stats[key] = arr[..., self.permutation].tolist()
+                entry[key] = arr[..., self.permutation].tolist()
+
+    def _reorder_stats(self, data: Dict) -> None:
+        if 'stats' not in data:
+            return
+        if not self.reorder_action_stats and not self.reorder_state_stats:
+            return
+        stats = copy.deepcopy(data['stats'])
+        if self.reorder_state_stats and not self.apply_state_sincos:
+            self._reorder_stat_entry(stats, self.stats_state_key)
+        if self.reorder_action_stats:
+            self._reorder_stat_entry(stats, self.stats_action_key)
         data['stats'] = stats
 
     def __call__(self, data: Dict) -> Dict:
@@ -185,7 +200,7 @@ class RobocasaGR1N15Bridge:
         if self.reorder_actions and self.action_key in data:
             data[self.action_key] = self._reorder_flat(data[self.action_key])
 
-        self._reorder_action_stats(data)
+        self._reorder_stats(data)
         return data
 
 

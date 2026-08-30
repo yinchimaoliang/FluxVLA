@@ -189,8 +189,11 @@ class ProcessPrompts():
             lang_tokens.append(negative_tokens)
             lang_masks.append(negative_token_mask)
         labels = list(tokens)
-        inputs['lang_tokens'] = np.array(tokens)
-        inputs['lang_masks'] = np.array(token_mask)
+        inputs['lang_tokens'] = np.array(lang_tokens)
+        inputs['lang_masks'] = np.array(lang_masks)
+        if self.negative_prompt is None:
+            inputs['lang_tokens'] = inputs['lang_tokens'][0]
+            inputs['lang_masks'] = inputs['lang_masks'][0]
         if self.with_labels:
             assert 'actions' in inputs, "Data must contain 'actions' key."
             actions = inputs['actions']

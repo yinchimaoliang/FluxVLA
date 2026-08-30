@@ -616,13 +616,19 @@ class RandomCropImages:
     """Random-crop CHW images by a fixed scale.
 
     This mirrors official GR00T ``VideoCrop(scale=0.95)`` in train mode,
-    where torchvision uses a random crop before resizing.
+    where torchvision uses a random crop before resizing. Set ``consistent``
+    for video models so every temporal frame receives the same crop.
     """
 
-    def __init__(self, scale: float = 0.95, *args, **kwargs):
+    def __init__(self,
+                 scale: float = 0.95,
+                 consistent: bool = False,
+                 *args,
+                 **kwargs):
         if not (0 < scale <= 1):
             raise ValueError(f'scale must be in (0, 1], got {scale}')
         self.scale = scale
+        self.consistent = consistent
 
     def _as_image_list(self, images):
         if isinstance(images, list):
@@ -647,11 +653,8 @@ class RandomCropImages:
             return arr.reshape(original_shape)
         return arr
 
-    def _crop_one(self, image: np.ndarray) -> np.ndarray:
+    def _crop_parameters(self, image: np.ndarray) -> tuple[int, int, int, int]:
         arr = np.asarray(image)
-        if self.scale == 1:
-            return arr
-
         channel_first = arr.ndim == 3 and arr.shape[0] == 3
         if channel_first:
             h, w = arr.shape[-2:]
@@ -665,6 +668,19 @@ class RandomCropImages:
         crop_w = max(1, int(w * self.scale))
         top = np.random.randint(0, h - crop_h + 1)
         left = np.random.randint(0, w - crop_w + 1)
+        return top, left, crop_h, crop_w
+
+    def _crop_one(self,
+                  image: np.ndarray,
+                  crop: tuple[int, int, int, int] = None) -> np.ndarray:
+        arr = np.asarray(image)
+        if self.scale == 1:
+            return arr
+        if crop is None:
+            crop = self._crop_parameters(arr)
+        top, left, crop_h, crop_w = crop
+
+        channel_first = arr.ndim == 3 and arr.shape[0] == 3
         if channel_first:
             return arr[:, top:top + crop_h, left:left + crop_w]
         return arr[top:top + crop_h, left:left + crop_w, :]
@@ -672,20 +688,29 @@ class RandomCropImages:
     def __call__(self, data: dict):
         assert 'images' in data, "Input data must contain 'images' key"
         images, kind, original_shape = self._as_image_list(data['images'])
-        cropped = [self._crop_one(image) for image in images]
+        crop = None
+        if self.consistent and images and self.scale != 1:
+            crop = self._crop_parameters(images[0])
+        cropped = [self._crop_one(image, crop=crop) for image in images]
         data['images'] = self._restore_images(cropped, kind, original_shape)
         return data
 
 
 @TRANSFORMS.register_module()
 class ColorJitterImages:
-    """Apply official GR00T-style torchvision color jitter to CHW images."""
+    """Apply official GR00T-style torchvision color jitter to CHW images.
+
+    Set ``consistent`` for video models so all temporal frames share one set
+    of sampled color-jitter parameters, matching a transform applied to a
+    single ``[T, C, H, W]`` video tensor.
+    """
 
     def __init__(self,
                  brightness: float = 0.3,
                  contrast: float = 0.4,
                  saturation: float = 0.5,
                  hue: float = 0.08,
+                 consistent: bool = False,
                  *args,
                  **kwargs):
         self.transform = ColorJitter(
@@ -693,6 +718,7 @@ class ColorJitterImages:
             contrast=contrast,
             saturation=saturation,
             hue=hue)
+        self.consistent = consistent
 
     def _as_image_list(self, images):
         if isinstance(images, list):
@@ -733,10 +759,42 @@ class ColorJitterImages:
         jittered = np.transpose(jittered, (1, 2, 0))
         return jittered.astype(image.dtype, copy=False)
 
+    def _jitter_consistently(self, images: list[np.ndarray]):
+        channel_first = []
+        tensors = []
+        for image in images:
+            arr = np.asarray(image)
+            is_channel_first = arr.ndim == 3 and arr.shape[0] == 3
+            if not is_channel_first and arr.ndim == 3 and arr.shape[-1] == 3:
+                arr = np.transpose(arr, (2, 0, 1))
+            elif not is_channel_first:
+                raise ValueError(
+                    'ColorJitterImages expects CHW or HWC image, got '
+                    f'{arr.shape}')
+            channel_first.append(is_channel_first)
+            tensors.append(torch.from_numpy(np.ascontiguousarray(arr)))
+
+        shapes = {tuple(tensor.shape) for tensor in tensors}
+        if len(shapes) != 1:
+            raise ValueError(
+                'Consistent color jitter requires equal image shapes, got '
+                f'{sorted(shapes)}')
+        jittered = self.transform(torch.stack(tensors)).detach().cpu().numpy()
+        outputs = []
+        for image, value, is_channel_first in zip(images, jittered,
+                                                  channel_first):
+            if not is_channel_first:
+                value = np.transpose(value, (1, 2, 0))
+            outputs.append(value.astype(image.dtype, copy=False))
+        return outputs
+
     def __call__(self, data: dict):
         assert 'images' in data, "Input data must contain 'images' key"
         images, kind, original_shape = self._as_image_list(data['images'])
-        jittered = [self._jitter_one(image) for image in images]
+        if self.consistent and images:
+            jittered = self._jitter_consistently(images)
+        else:
+            jittered = [self._jitter_one(image) for image in images]
         data['images'] = self._restore_images(jittered, kind, original_shape)
         return data
 
