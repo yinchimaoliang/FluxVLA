@@ -33,6 +33,7 @@ _QWEN3VL_VLA_CKPT = (
     _QWEN3VL_VLA_ROOT +
     '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
 _QWEN3VL_TOKENIZER = _QWEN3VL_VLA_ROOT + '/tokenizer/'
+_ROBOCASA_ACTION_HORIZON = 16
 
 _QWEN3VL_VLM_CONFIG = dict(
     architectures=['Qwen3VLAForConditionalGeneration'],
@@ -127,19 +128,19 @@ model = dict(
             norm_type='ada_norm',
             positional_embeddings=None),
         num_inference_timesteps=4,
-        num_steps=10,
+        num_steps=_ROBOCASA_ACTION_HORIZON,
         action_dim=32,
-        ori_action_dim=29),
+        ori_action_dim=29,
+        # Official GR00T keeps noise in the three padded action dimensions.
+        zero_padded_action_dims=False),
     freeze_vlm_backbone=False,
     freeze_projector=False)
 
 # Evaluation uses the same Qwen3-VL and flow-matching implementation.
 inference_model = model.copy()
 
-_ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_30ep'
+_ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_full'
 _ROBOCASA_DATA_ROOT = './datasets/robocasa_lerobot_V2.1'
-_OFFICIAL_GR1_STATS_PATH = ('./datasets/robocasa_gr1_24tasks_first30ep/'
-                            'official_groot_gr1_dataset_statistics.json')
 _ROBOCASA_TASK_PREFIX = 'gr1_unified'
 _ROBOCASA_ENV_SUFFIX = '_GR1ArmsAndWaistFourierHands_Env'
 
@@ -190,7 +191,9 @@ train_dataloader = dict(
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
         statistic_name=_ROBOCASA_STATISTIC_NAME,
-        dataset_statistics_path=_OFFICIAL_GR1_STATS_PATH,
+        # Aggregate statistics from the same full 24-task dataset used below.
+        # The old first-30-episode statistics do not match this dataset.
+        reshuffle_each_epoch=True,
         datasets=dict(
             type='ParquetDataset',
             data_root_path=[
@@ -247,9 +250,10 @@ train_dataloader = dict(
                     state_key='proprio',
                     action_key='action',
                     norm_type='min_max',
+                    zero_constant_min_max_dims=True,
                     normalize_states=False),
             ],
-            action_window_size=10,
+            action_window_size=_ROBOCASA_ACTION_HORIZON,
             action_key='action',
             use_delta=False,
             statistic_name=_ROBOCASA_STATISTIC_NAME,
@@ -310,7 +314,7 @@ eval = dict(
     model_family='groot',
     task_list=[_robocasa_task_env(task_name) for task_name in _ROBOCASA_TASKS],
     total_tasks=24,
-    eval_chunk_size=10,
+    eval_chunk_size=_ROBOCASA_ACTION_HORIZON,
     max_episode_steps=720,
     num_trials_per_task=50,
     seed=7,
@@ -338,6 +342,7 @@ eval = dict(
                 state_key='proprio',
                 action_key='action',
                 norm_type='min_max',
+                zero_constant_min_max_dims=True,
                 normalize_states=False),
             dict(
                 type='QWen2VLImageTransform',
