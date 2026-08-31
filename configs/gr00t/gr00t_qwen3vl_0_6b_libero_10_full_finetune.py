@@ -15,11 +15,9 @@
 # GR00T VLA: Qwen3-0.6B LLM + Qwen3-VL 2B Vision
 #               + linear projection 1024->2048.
 
-_qwen3vl_vla_root = './checkpoints/gr00t_qwen3vl_0.6b_libero'
-_qwen3vl_vla_ckpt = (
-    _qwen3vl_vla_root +
-    '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
-_qwen3vl_tokenizer = _qwen3vl_vla_root + '/tokenizer/'
+_qwen3vl_backbone_root = './checkpoints/Qwen3-VL-0.6B'
+_gr00t_head_root = './checkpoints/GR00T-N1.5-3B'
+_qwen3vl_tokenizer = _qwen3vl_backbone_root
 _qwen3vl_vlm_config = dict(
     architectures=['Qwen3VLAForConditionalGeneration'],
     dtype='bfloat16',
@@ -76,15 +74,15 @@ _qwen3vl_vlm_config = dict(
 
 model = dict(
     type='LlavaVLA',
-    pretrained_name_or_path=_qwen3vl_vla_ckpt,
-    name_mapping=None,
+    pretrained_name_or_path=_gr00t_head_root,
+    name_mapping={'vla_head': 'action_head'},
     strict_mapping=False,
     # Qwen3-VL-0.6B (native 1024) + linear projection 1024->2048
     # to match GR00T-N1.5 action head
     vlm_backbone=dict(
         type='Qwen3VL',
         vlm_backbone_id='qwen3_0.6b_vl_pt',
-        vlm_path=None,
+        vlm_path=_qwen3vl_backbone_root,
         vlm_config=_qwen3vl_vlm_config,
         use_projection=True,
         projection_output_dim=2048,
@@ -121,15 +119,15 @@ model = dict(
     freeze_vlm_backbone=False,
     freeze_projector=False)
 
-# Eval: same architecture as model; weights from checkpoint only (no GR00T)
+# Eval uses the same split backbone/head initialization as training.
 inference_model = dict(
     type='LlavaVLA',
-    pretrained_name_or_path=_qwen3vl_vla_ckpt,
-    name_mapping=None,
+    pretrained_name_or_path=_gr00t_head_root,
+    name_mapping={'vla_head': 'action_head'},
     vlm_backbone=dict(
         type='Qwen3VL',
         vlm_backbone_id='qwen3_0.6b_vl_pt',
-        vlm_path=None,
+        vlm_path=_qwen3vl_backbone_root,
         vlm_config=_qwen3vl_vlm_config,
         use_projection=True,
         projection_output_dim=2048,

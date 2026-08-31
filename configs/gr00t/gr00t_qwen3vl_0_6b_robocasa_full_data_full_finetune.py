@@ -14,7 +14,7 @@
 """Full-data Qwen3-VL-0.6B + GR00T fine-tuning on RoboCasa GR1.
 
 The model and image/tokenizer pipeline follow
-``gr00t_qwen3vl_0.6b_libero_10_full_finetune.py``. The RoboCasa dataset,
+``gr00t_qwen3vl_0_6b_libero_10_full_finetune.py``. The RoboCasa dataset,
 task list, statistics, GR1-N1.5 bridge, and evaluation setup follow the
 existing GR00T/PI0.5 RoboCasa configs.
 
@@ -23,16 +23,14 @@ Example for two 8-GPU nodes:
         --node_rank=${NODE_RANK} --master_addr=${MASTER_ADDR} \
         --master_port=${MASTER_PORT} scripts/train.py \
         --config \
-        configs/gr00t/gr00t_qwen3vl_0.6b_robocasa_full_data_full_finetune.py \
+        configs/gr00t/gr00t_qwen3vl_0_6b_robocasa_full_data_full_finetune.py \
         --work-dir \
-        work_dirs/gr00t_qwen3vl_0.6b_robocasa_full_data_full_finetune
+        work_dirs/gr00t_qwen3vl_0_6b_robocasa_full_data_full_finetune
 """
 
-_QWEN3VL_VLA_ROOT = './checkpoints/gr00t_qwen3vl_0.6b_libero'
-_QWEN3VL_VLA_CKPT = (
-    _QWEN3VL_VLA_ROOT +
-    '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
-_QWEN3VL_TOKENIZER = _QWEN3VL_VLA_ROOT + '/tokenizer/'
+_QWEN3VL_BACKBONE_ROOT = './checkpoints/Qwen3-VL-0.6B'
+_GR00T_HEAD_ROOT = './checkpoints/GR00T-N1.5-3B'
+_QWEN3VL_TOKENIZER = _QWEN3VL_BACKBONE_ROOT
 _ROBOCASA_ACTION_HORIZON = 16
 
 _QWEN3VL_VLM_CONFIG = dict(
@@ -91,13 +89,13 @@ _QWEN3VL_VLM_CONFIG = dict(
 
 model = dict(
     type='LlavaVLA',
-    pretrained_name_or_path=_QWEN3VL_VLA_CKPT,
-    name_mapping=None,
+    pretrained_name_or_path=_GR00T_HEAD_ROOT,
+    name_mapping={'vla_head': 'action_head'},
     strict_mapping=False,
     vlm_backbone=dict(
         type='Qwen3VL',
         vlm_backbone_id='qwen3_0.6b_vl_pt',
-        vlm_path=None,
+        vlm_path=_QWEN3VL_BACKBONE_ROOT,
         vlm_config=_QWEN3VL_VLM_CONFIG,
         use_projection=True,
         projection_output_dim=2048,

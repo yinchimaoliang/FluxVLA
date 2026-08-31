@@ -791,11 +791,12 @@ hf download mondo-robotics/dit4dit-model \
 <details>
 <summary><b>视觉语言模型（VLM）</b></summary>
 
-| 模型       | 大小 | 下载链接                                                                             |
-| ---------- | ---- | ------------------------------------------------------------------------------------ |
-| Qwen2.5-VL | 3B   | [🤗 Hugging Face](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)                |
-| Qwen3-VL   | 30B  | [🤗 Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct)             |
-| SmolVLM2   | 500M | [🤗 Hugging Face](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct) |
+| 模型       | 大小 | 下载链接                                                                                     |
+| ---------- | ---- | -------------------------------------------------------------------------------------------- |
+| Qwen2.5-VL | 3B   | [🤗 Hugging Face](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)                        |
+| Qwen3-VL   | 0.6B | [🤗 Hugging Face](https://huggingface.co/limxdynamics/FluxVLAEngine/tree/main/Qwen3-VL-0.6B) |
+| Qwen3-VL   | 30B  | [🤗 Hugging Face](https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct)                     |
+| SmolVLM2   | 500M | [🤗 Hugging Face](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct)         |
 
 </details>
 

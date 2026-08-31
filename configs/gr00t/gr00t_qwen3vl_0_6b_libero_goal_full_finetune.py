@@ -14,11 +14,9 @@
 
 # GR00T VLA: Qwen3-0.6B LLM + Qwen3-VL 2B Vision
 #               + linear projection 1024->2048.
-_qwen3vl_vla_root = './checkpoints/gr00t_qwen3vl_0.6b_libero'
-_qwen3vl_vla_ckpt = (
-    _qwen3vl_vla_root +
-    '/checkpoints/step-104160-epoch-24-loss=0.0358.safetensors')
-_qwen3vl_tokenizer = _qwen3vl_vla_root + '/tokenizer/'
+_qwen3vl_backbone_root = './checkpoints/Qwen3-VL-0.6B'
+_gr00t_head_root = './checkpoints/GR00T-N1.5-3B'
+_qwen3vl_tokenizer = _qwen3vl_backbone_root
 _qwen3vl_vlm_config = dict(
     architectures=['Qwen3VLAForConditionalGeneration'],
     dtype='bfloat16',
@@ -75,15 +73,15 @@ _qwen3vl_vlm_config = dict(
 
 model = dict(
     type='LlavaVLA',
-    pretrained_name_or_path=_qwen3vl_vla_ckpt,
-    name_mapping=None,
+    pretrained_name_or_path=_gr00t_head_root,
+    name_mapping={'vla_head': 'action_head'},
     strict_mapping=False,
     # Qwen3-VL-0.6B (native 1024) + linear projection 1024->2048
     # to match GR00T-N1.5 action head
     vlm_backbone=dict(
         type='Qwen3VL',
         vlm_backbone_id='qwen3_0.6b_vl_pt',
-        vlm_path=None,
+        vlm_path=_qwen3vl_backbone_root,
         vlm_config=_qwen3vl_vlm_config,
         use_projection=True,
         projection_output_dim=2048,
@@ -120,15 +118,15 @@ model = dict(
     freeze_vlm_backbone=False,
     freeze_projector=False)
 
-# Eval: same architecture as model; weights from checkpoint only (no GR00T)
+# Eval uses the same split backbone/head initialization as training.
 inference_model = dict(
     type='LlavaVLA',
-    pretrained_name_or_path=_qwen3vl_vla_ckpt,
-    name_mapping=None,
+    pretrained_name_or_path=_gr00t_head_root,
+    name_mapping={'vla_head': 'action_head'},
     vlm_backbone=dict(
         type='Qwen3VL',
         vlm_backbone_id='qwen3_0.6b_vl_pt',
-        vlm_path=None,
+        vlm_path=_qwen3vl_backbone_root,
         vlm_config=_qwen3vl_vlm_config,
         use_projection=True,
         projection_output_dim=2048,
@@ -174,11 +172,11 @@ train_dataloader = dict(
             'action': ['action']
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
-        statistic_name='libero_object_no_noops',
+        statistic_name='libero_goal_no_noops',
         datasets=dict(
             type='ParquetDataset',
             data_root_path=[  # noqa: E251
-                'datasets/libero_object_no_noops_lerobotv2.1',
+                'datasets/libero_goal_no_noops_lerobotv2.1',
             ],
             transforms=[
                 dict(
@@ -227,13 +225,13 @@ train_dataloader = dict(
             action_window_size=10,
             action_key='action',
             use_delta=False,
-            statistic_name='libero_object_no_noops',
+            statistic_name='libero_goal_no_noops',
             window_start_idx=0)))
 
 runner = dict(
     type='FSDPTrainRunner',
     max_epochs=24,
-    optimizer=dict(lr=3e-5, type='AdamW', weight_decay=0.0),
+    optimizer=dict(lr=1.5e-5, type='AdamW', weight_decay=0.0),
     max_grad_norm=1.0,
     sampler=None,
     tokenizer=dict(type='PretrainedTokenizer', model_path=_qwen3vl_tokenizer),
@@ -262,7 +260,7 @@ runner = dict(
 
 eval = dict(
     type='LiberoEvalRunner',
-    task_suite_name='libero_object',
+    task_suite_name='libero_goal',
     model_family='pi0',
     eval_chunk_size=10,
     resize_size=224,
