@@ -19,6 +19,7 @@ import json
 import os
 import random
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -368,6 +369,14 @@ class RobocasaEvalRunner(BaseEvalRunner):
             if isinstance(frame, np.ndarray):
                 return frame.copy()
         return None
+
+    def _get_policy_frame(self, obs: Dict) -> Optional[np.ndarray]:
+        """Extract the image consumed by the policy preprocessing pipeline."""
+        for transform in getattr(self.dataset, 'transforms', []):
+            img_key = getattr(transform, 'img_key', None)
+            if img_key and isinstance(obs.get(img_key), np.ndarray):
+                return obs[img_key].copy()
+        return self._get_rollout_frame(obs)
 
     def _episode_seed(self, local_id: int) -> int:
         return self._normalize_seed(self.seed + local_id)
@@ -848,6 +857,13 @@ class RobocasaEvalRunner(BaseEvalRunner):
                 # Evaluation loop.
                 success = False
                 replay_images = []
+                policy_history_len = getattr(self.dataset, 'img_buffer_len', 1)
+                policy_image_history = None
+                if policy_history_len > 1:
+                    policy_image_history = deque(maxlen=policy_history_len)
+                    policy_frame = self._get_policy_frame(obs)
+                    if policy_frame is not None:
+                        policy_image_history.append(policy_frame)
                 if self.save_video:
                     frame = self._get_rollout_frame(obs)
                     if frame is not None:
@@ -858,6 +874,12 @@ class RobocasaEvalRunner(BaseEvalRunner):
                 while t < self.max_episode_steps:
                     # Build input dict for the dataset transform pipeline.
                     obs['task_description'] = task_desc
+                    if policy_image_history is not None:
+                        # Temporal policies must clear episode-local image/KV
+                        # history exactly once, before the first policy call.
+                        obs['is_new_episode'] = t == 0
+                        obs['policy_image_history'] = np.stack(
+                            policy_image_history, axis=0)
                     batch, _ = self.dataset(obs)
                     debug_info = getattr(self.dataset, 'last_debug', {})
                     if t == 0:
@@ -941,6 +963,11 @@ class RobocasaEvalRunner(BaseEvalRunner):
                         # Step the environment.
                         obs, reward, terminated, truncated, info = \
                             env.step(action_dict)
+
+                        if policy_image_history is not None:
+                            policy_frame = self._get_policy_frame(obs)
+                            if policy_frame is not None:
+                                policy_image_history.append(policy_frame)
 
                         # Collect rendered frames for rollout videos.
                         if self.save_video:

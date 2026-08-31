@@ -15,6 +15,7 @@
 
 import copy
 import json
+from collections import deque
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -232,6 +233,9 @@ class ProcessRobocasaEvalInputs:
             float32 [0, 1] and return CHW tensors for PI0.5. If False, keep
             HWC uint8 images for downstream image transforms.
         embodiment_id: Optional embodiment id passed through for GR00T heads.
+        history_key: Optional input key containing recent images as
+            ``[T, H, W, C]``. When present, normalized images are emitted as
+            ``[1, T, C, H, W]`` for ``PrepareVideo``.
     """
 
     def __init__(self,
@@ -240,7 +244,8 @@ class ProcessRobocasaEvalInputs:
                  center_crop_scale: Optional[float] = None,
                  normalize: bool = True,
                  value_range: str = 'unit',
-                 embodiment_id: Optional[int] = None):
+                 embodiment_id: Optional[int] = None,
+                 history_key: str = 'policy_image_history'):
         if center_crop_scale is not None and not (0 < center_crop_scale <= 1):
             raise ValueError(f'center_crop_scale must be in (0, 1], got '
                              f'{center_crop_scale}')
@@ -257,6 +262,7 @@ class ProcessRobocasaEvalInputs:
         self.value_range = value_range
         # Keep the signature aligned with training ProcessParquetInputs.
         self.embodiment_id = embodiment_id
+        self.history_key = history_key
 
     def _center_crop(self, img: np.ndarray) -> np.ndarray:
         if self.center_crop_scale is None or self.center_crop_scale == 1:
@@ -277,29 +283,51 @@ class ProcessRobocasaEvalInputs:
             # Preserve the raw image for rollout video saving.
             result['replay_img'] = img.copy()
 
-            # Official GR00T VideoCrop(scale=0.95) is a center crop in eval.
-            img = self._center_crop(img)
-
-            # Resize RoboCasa 256x256 frames to the model input size.
-            if (img.shape[0] != self.resize_size
-                    or img.shape[1] != self.resize_size):
-                img = cv2.resize(img, (self.resize_size, self.resize_size))
-
-            if self.normalize:
-                # PI0.5 path: uint8 [0, 255] -> float32 [0, 1] (or [-1, 1]).
-                img = img.astype(np.float32) / 255.0
-                if self.value_range == 'tanh':
-                    img = img * 2.0 - 1.0
-                # HWC -> CHW.
-                img = np.transpose(img, (2, 0, 1))  # (3, 224, 224)
-                # Convert to tensor.
-                pixel_values = torch.from_numpy(img).float()  # (3, 224, 224)
-                result['pixel_values'] = pixel_values
+            history = data.get(self.history_key)
+            if history is None:
+                images = [img]
             else:
-                # GR00T path: keep HWC uint8 images for downstream transforms.
-                result['pixel_values'] = img  # (224, 224, 3) uint8
+                history = np.asarray(history)
+                if history.ndim != 4 or history.shape[-1] != 3:
+                    raise ValueError(
+                        f'{self.history_key} must have shape [T,H,W,3], got '
+                        f'{history.shape}')
+                images = list(history)
 
-            result['img_masks'] = np.array([True])
+            processed_images = []
+            for history_img in images:
+                # Official GR00T VideoCrop(scale=0.95) is a center crop in
+                # eval.
+                history_img = self._center_crop(history_img)
+                if (history_img.shape[0] != self.resize_size
+                        or history_img.shape[1] != self.resize_size):
+                    history_img = cv2.resize(
+                        history_img, (self.resize_size, self.resize_size))
+
+                if self.normalize:
+                    # uint8 [0,255] -> float32 [0,1] (or [-1,1]), HWC -> CHW.
+                    history_img = history_img.astype(np.float32) / 255.0
+                    if self.value_range == 'tanh':
+                        history_img = history_img * 2.0 - 1.0
+                    history_img = np.transpose(history_img, (2, 0, 1))
+                    processed_images.append(
+                        torch.from_numpy(history_img).float())
+                else:
+                    processed_images.append(history_img)
+
+            if not self.normalize and len(processed_images) > 1:
+                raise ValueError(
+                    f'{self.history_key} is only supported when normalize=True'
+                )
+            if self.normalize and len(processed_images) > 1:
+                # [1 view, T, C, H, W] -> PrepareVideo -> [C, T, H, W].
+                result['pixel_values'] = torch.stack(
+                    processed_images, dim=0).unsqueeze(0)
+            else:
+                # Preserve the existing single-image contract for PI0.5 and
+                # GR00T configs.
+                result['pixel_values'] = processed_images[0]
+            result['img_masks'] = np.ones(len(processed_images), dtype=bool)
         else:
             raise ValueError(f'Image key {self.img_key} is missing from obs. '
                              f'Available keys: {list(data.keys())}')
@@ -448,12 +476,17 @@ class RobocasaEvalDataset:
         norm_stats: Normalization statistics path or dict.
         unnorm_key: Key inside the statistics dict.
         transforms: Transform config list.
+        img_buffer_len: Number of recent policy observations retained for
+            temporal models such as DreamZero. The first request remains a
+            single frame; later short histories are left-padded with the
+            earliest available frame, matching the LIBERO causal eval path.
     """
 
     def __init__(self,
                  norm_stats: Any = None,
                  unnorm_key: str = 'robocasa_gr1_test',
                  transforms: List[Dict] = None,
+                 img_buffer_len: int = 1,
                  **kwargs) -> None:
         from fluxvla.engines import build_transform_from_cfg
 
@@ -461,6 +494,12 @@ class RobocasaEvalDataset:
             build_transform_from_cfg(t) for t in (transforms or [])
         ]
         self.unnorm_key = unnorm_key
+        if img_buffer_len < 1:
+            raise ValueError('img_buffer_len must be >= 1')
+        self.img_buffer_len = img_buffer_len
+        self.img_buffer = None
+        self.img_mask_buffer = None
+        self.img_buffer_updates = 0
         # In grouped evaluation this is set per task by RobocasaEvalRunner.
         self._active_stats_blob: Optional[Dict] = None
         self.last_raw_state: Optional[np.ndarray] = None
@@ -471,6 +510,56 @@ class RobocasaEvalDataset:
                 self.norm_stats = json.load(f)
         else:
             self.norm_stats = norm_stats
+
+    def _reset_img_buffer(self) -> None:
+        self.img_buffer = None
+        self.img_mask_buffer = None
+        self.img_buffer_updates = 0
+
+    def _split_image_frames(self,
+                            pixel_values: torch.Tensor) -> List[torch.Tensor]:
+        if pixel_values.ndim == 4 and pixel_values.shape[0] == 3:
+            return [
+                pixel_values[:, i:i + 1].detach().clone()
+                for i in range(pixel_values.shape[1])
+            ]
+        if pixel_values.ndim in (3, 4):
+            return [pixel_values.detach().clone()]
+        raise ValueError(f'Unsupported image shape: {pixel_values.shape}')
+
+    def _update_img_buffer(self, pixel_values: torch.Tensor,
+                           img_masks: List[bool]):
+        if self.img_buffer is None:
+            self.img_buffer = deque(maxlen=self.img_buffer_len)
+            self.img_mask_buffer = deque(maxlen=self.img_buffer_len)
+
+        frames = self._split_image_frames(pixel_values)
+        if len(img_masks) == len(frames):
+            frame_masks = [[mask] for mask in img_masks]
+        else:
+            frame_masks = [list(img_masks) for _ in frames]
+        for frame, masks in zip(frames, frame_masks):
+            self.img_buffer.append(frame)
+            self.img_mask_buffer.append(masks)
+
+        buffered_frames = list(self.img_buffer)
+        buffered_masks = list(self.img_mask_buffer)
+        is_first_buffer_update = self.img_buffer_updates == 0
+        self.img_buffer_updates += 1
+        if (not is_first_buffer_update
+                and len(buffered_frames) < self.img_buffer_len):
+            pad_len = self.img_buffer_len - len(buffered_frames)
+            buffered_frames = [buffered_frames[0]] * pad_len + buffered_frames
+            buffered_masks = [buffered_masks[0]] * pad_len + buffered_masks
+
+        if buffered_frames[0].ndim == 4:
+            pixel_values = torch.cat(buffered_frames, dim=1)
+        else:
+            pixel_values = torch.cat(buffered_frames, dim=0)
+        img_masks = [
+            mask for frame_masks in buffered_masks for mask in frame_masks
+        ]
+        return pixel_values, img_masks
 
     def set_active_stats_blob(self, blob: Optional[Dict]) -> None:
         """Set the active statistics blob for grouped evaluation.
@@ -491,6 +580,9 @@ class RobocasaEvalDataset:
         """
         data = dict(inputs)
         self.last_raw_state = flatten_robocasa_state(data)
+        is_new_episode = bool(data.get('is_new_episode', False))
+        if is_new_episode:
+            self._reset_img_buffer()
 
         # Inject statistics required by NormalizeStatesAndActions.
         if self._active_stats_blob is not None:
@@ -540,6 +632,10 @@ class RobocasaEvalDataset:
         else:
             img_masks = list(img_masks)
 
+        if self.img_buffer_len > 1:
+            pixel_values, img_masks = self._update_img_buffer(
+                pixel_values, img_masks)
+
         batch = dict(
             images=pixel_values.cuda().unsqueeze(0),
             img_masks=torch.tensor([img_masks]).cuda(),
@@ -575,5 +671,8 @@ class RobocasaEvalDataset:
         else:
             batch['embodiment_ids'] = torch.zeros(
                 bsz, dtype=torch.long, device=dev)
+
+        if self.img_buffer_len > 1:
+            batch['reset_history'] = is_new_episode
 
         return batch, replay_img

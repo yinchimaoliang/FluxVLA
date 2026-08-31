@@ -13,12 +13,12 @@
 # limitations under the License.
 """Full-data DreamZero fine-tuning on the RoboCasa GR1 tabletop tasks.
 
-The dataset layout, task list, fixed statistics asset, and closed-loop
-evaluation setup follow
+The dataset layout, task list, and closed-loop evaluation setup follow
 ``configs/pi05/pi05_paligemma_robocasa_full_data_full_finetune.py``. The
 DreamZero-specific video, tokenizer, and model settings follow the existing
-LIBERO recipe. RoboCasa vector ordering, min-max normalization, augmentation,
-and classifier-free guidance follow the released DreamZero data contract.
+LIBERO recipe. RoboCasa vector ordering, state encoding, min-max action
+normalization, augmentation, and classifier-free guidance follow the released
+DreamZero data contract.
 
 Example for two 8-GPU nodes sharing MASTER_ADDR and MASTER_PORT:
     torchrun --nnodes=2 --nproc_per_node=8 \
@@ -51,10 +51,9 @@ model = dict(
     frame_window_size=_FRAME_WINDOW_SIZE,
     pretrained_name_or_path=  # noqa: E251
     _CKPT_ROOT + '/DreamZero-AgiBot',
-    # RoboCasaEvalDataset currently supplies one observation per policy call,
-    # so use stateless inference rather than resetting a causal cache on every
-    # call.
-    use_cache=False,
+    # RoboCasaEvalDataset keeps the four-frame observation history expected by
+    # DreamZero's causal real-world inference path.
+    use_cache=True,
     vlm_backbone=dict(
         type='Wan21Backbone',
         text_encoder_path=None,
@@ -93,7 +92,9 @@ model = dict(
         use_gradient_checkpointing=True,
         cfg_scale=5.0,
         validate_action_range=True,
-        max_chunk_size=-1,
+        # Bound the persistent KV cache to the same two-block window used by
+        # the validated DreamZero LIBERO cached-inference recipes.
+        max_chunk_size=2,
     ),
     name_mapping={
         'vla_head.model': 'action_head.model',
@@ -105,8 +106,6 @@ model = dict(
 
 _ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_30ep'
 _ROBOCASA_DATA_ROOT = './datasets/robocasa_lerobot_V2.1'
-_OFFICIAL_GR1_STATS_PATH = ('./datasets/robocasa_gr1_24tasks_first30ep/'
-                            'official_groot_gr1_dataset_statistics.json')
 _ROBOCASA_TASK_PREFIX = 'gr1_unified'
 _ROBOCASA_ENV_SUFFIX = '_GR1ArmsAndWaistFourierHands_Env'
 
@@ -158,7 +157,10 @@ train_dataloader = dict(
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
         statistic_name=_ROBOCASA_STATISTIC_NAME,
-        dataset_statistics_path=_OFFICIAL_GR1_STATS_PATH,
+        # Aggregate statistics from the same full 24-task dataset used below.
+        # The first-30-episode statistics previously used here do not match
+        # this training distribution.
+        reshuffle_each_epoch=True,
         datasets=dict(
             type='ParquetDataset',
             data_root_path=[
@@ -184,7 +186,7 @@ train_dataloader = dict(
                 ),
                 dict(
                     type='RobocasaGR1N15Bridge',
-                    apply_state_sincos=False,
+                    apply_state_sincos=True,
                 ),
                 dict(type='ParquetPrompter', use_conversation=False),
                 dict(
@@ -218,6 +220,9 @@ train_dataloader = dict(
                     action_key='action',
                     norm_type='min_max',
                     clip_norm=True,
+                    # Official DreamZero ``gr1_unified`` encodes every raw
+                    # joint state as sin/cos and only normalizes actions.
+                    normalize_states=False,
                 ),
                 dict(
                     type='PrepareVideo',
@@ -227,6 +232,9 @@ train_dataloader = dict(
             ],
             action_window_size=10,
             action_key='action',
+            # DreamZero's released ``gr1_unified`` contract uses absolute
+            # joint targets. Its relative-action key list is specific to the
+            # AgiBot schema and does not match RoboCasa action keys.
             use_delta=False,
             statistic_name=_ROBOCASA_STATISTIC_NAME,
             window_start_idx=0,
@@ -297,6 +305,10 @@ eval = dict(
     dataset=dict(
         type='RobocasaEvalDataset',
         unnorm_key=_ROBOCASA_STATISTIC_NAME,
+        # First request warms the cache with one frame. Later requests expose
+        # four recent observations, which DreamZero expands to the nine-frame
+        # video layout used during training.
+        img_buffer_len=4,
         transforms=[
             dict(
                 type='ProcessRobocasaEvalInputs',
@@ -309,7 +321,7 @@ eval = dict(
             ),
             dict(
                 type='RobocasaGR1N15Bridge',
-                apply_state_sincos=False,
+                apply_state_sincos=True,
             ),
             dict(
                 type='NormalizeStatesAndActions',
@@ -318,6 +330,7 @@ eval = dict(
                 action_key='action',
                 norm_type='min_max',
                 clip_norm=True,
+                normalize_states=False,
             ),
             dict(type='ParquetPrompter', use_conversation=False),
             dict(
@@ -340,7 +353,9 @@ eval = dict(
         type='DenormalizeRobocasaAction',
         norm_type='min_max',
         action_dim=29,
-        clip_actions=False,
+        # Flow matching is unconstrained, while the training targets are in
+        # [-1, 1]. Avoid mapping early-checkpoint outliers to unsafe joints.
+        clip_actions=True,
         stats_order='fluxvla',
     ),
 )
