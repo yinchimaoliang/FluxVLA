@@ -296,7 +296,9 @@ eval = dict(
     total_tasks=24,
     eval_chunk_size=10,
     max_episode_steps=720,
-    num_trials_per_task=20,
+    # Match the reported RoboCasa protocol: 24 tasks x 50 trials = 1200
+    # episodes in total.
+    num_trials_per_task=50,
     seed=7,
     unnorm_key=_ROBOCASA_STATISTIC_NAME,
     action_order='n15',
