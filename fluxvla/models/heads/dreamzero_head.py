@@ -31,6 +31,25 @@ KVCacheType: TypeAlias = torch.Tensor
 logger = logging.getLogger(__name__)
 
 
+def _expand_block_timesteps_for_actions(
+    timestep_id_block: torch.Tensor,
+    action_horizon: int,
+) -> torch.Tensor:
+    """Expand one timestep per video block to its paired action tokens."""
+    if timestep_id_block.ndim != 3:
+        raise ValueError(
+            'timestep_id_block must have shape [B, blocks, frames], got '
+            f'{tuple(timestep_id_block.shape)}')
+    num_video_intervals = (
+        timestep_id_block.shape[1] * timestep_id_block.shape[2])
+    if action_horizon % num_video_intervals != 0:
+        raise ValueError(
+            f'action_horizon={action_horizon} is not divisible by the '
+            f'{num_video_intervals} non-conditioning video frames.')
+    repeats = action_horizon // num_video_intervals
+    return timestep_id_block.repeat(1, 1, repeats).flatten(1)
+
+
 def _import_dreamzero_modules():
     """Lazily import DreamZero modules so the rest of fluxvla still works
     even when optional dependencies (flash-attn, etc.) are missing."""
@@ -296,10 +315,9 @@ class DreamZeroHead(nn.Module):
                                         1:].reshape(timestep_id.shape[0], -1,
                                                     self.num_frame_per_block)
         timestep_id_block[:, :, 1:] = timestep_id_block[:, :, 0:1]
-        timestep_id_block = timestep_id_block.reshape(
-            timestep_id_block.shape[0], -1)
-        timestep_id = torch.concat([timestep_id[:, :1], timestep_id_block],
-                                   dim=1)
+        flat_timestep_id_block = timestep_id_block.flatten(1)
+        timestep_id = torch.concat(
+            [timestep_id[:, :1], flat_timestep_id_block], dim=1)
 
         _, num_lat_frames, num_channels, lat_h, lat_w = noise.shape
         frame_seqlen = int(lat_h * lat_w / 4)
@@ -324,18 +342,8 @@ class DreamZeroHead(nn.Module):
                 0, self.scheduler.num_train_timesteps,
                 (actions.shape[0], actions.shape[1]))
         else:
-            timestep_action_id = timestep_id_block.repeat(
-                1,
-                1,
-                actions.shape[1] // (noise.shape[1] - 1) if
-                (noise.shape[1] - 1) > 0 else 1,
-            )
-            timestep_action_id = timestep_action_id.reshape(
-                timestep_action_id.shape[0], -1)
-            if timestep_action_id.shape[1] != actions.shape[1]:
-                timestep_action_id = torch.randint(
-                    0, self.scheduler.num_train_timesteps,
-                    (actions.shape[0], actions.shape[1]))
+            timestep_action_id = _expand_block_timesteps_for_actions(
+                timestep_id_block, actions.shape[1])
 
         timestep_action = self.scheduler.timesteps[timestep_action_id].to(
             device)

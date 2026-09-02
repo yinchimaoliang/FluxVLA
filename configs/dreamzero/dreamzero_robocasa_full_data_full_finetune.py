@@ -33,10 +33,15 @@ Example for two 8-GPU nodes sharing MASTER_ADDR and MASTER_PORT:
 _CKPT_ROOT = './checkpoints'
 _TOKENIZER = _CKPT_ROOT + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
 
-# Nine raw frames become three VAE latent frames: one conditioning frame and
-# one two-frame dynamics block paired with a ten-step action chunk.
-_FRAME_WINDOW_SIZE = 9
+# Seventeen raw frames become five VAE latent frames: one conditioning frame
+# and two two-frame dynamics blocks paired with two ten-step action chunks.
+# This is the cached-training contract used by the validated DreamZero LIBERO
+# recipes; training only one block leaves cross-block cache attention unseen.
+_FRAME_WINDOW_SIZE = 17
 _NUM_VIEWS = 1
+_IMAGE_SIZE = 256
+_FRAME_SEQUENCE_LENGTH = (_IMAGE_SIZE // 16)**2
+_PROMPT_TEMPLATE = 'A single view video shows that a human {task}'
 _NEGATIVE_PROMPT = (
     'Vibrant colors, overexposed, static, blurry details, text, subtitles, '
     'style, artwork, painting, image, still, grayscale, dull, worst quality, '
@@ -51,7 +56,7 @@ model = dict(
     frame_window_size=_FRAME_WINDOW_SIZE,
     pretrained_name_or_path=  # noqa: E251
     _CKPT_ROOT + '/DreamZero-AgiBot',
-    # RoboCasaEvalDataset keeps the four-frame observation history expected by
+    # RoboCasaEvalDataset keeps the recent observation history expected by
     # DreamZero's causal real-world inference path.
     use_cache=True,
     vlm_backbone=dict(
@@ -73,8 +78,9 @@ model = dict(
         num_frame_per_block=2,
         num_action_per_block=10,
         num_state_per_block=1,
-        # One 128x128 view -> 16x16 VAE latent -> 8x8 DiT patch grid.
-        frame_seqlen=64,
+        # One 256x256 view -> 32x32 VAE latent -> 16x16 DiT patch grid.
+        # This matches the released DreamZero ``gr1_unified`` transform.
+        frame_seqlen=_FRAME_SEQUENCE_LENGTH,
         hidden_size=1024,
         input_embedding_dim=1536,
         dit_dim=5120,
@@ -88,12 +94,14 @@ model = dict(
         noise_beta_alpha=1.5,
         noise_beta_beta=1.0,
         noise_s=0.999,
+        # The released DreamZero inference implementation uses 16 denoising
+        # steps, irrespective of the stale value in its checkpoint config.
         num_inference_steps=16,
         use_gradient_checkpointing=True,
         cfg_scale=5.0,
         validate_action_range=True,
-        # Bound the persistent KV cache to the same two-block window used by
-        # the validated DreamZero LIBERO cached-inference recipes.
+        # Keep the two-block window used when this RoboCasa checkpoint was
+        # trained. Changing it at evaluation changes the causal attention mask.
         max_chunk_size=2,
     ),
     name_mapping={
@@ -146,7 +154,7 @@ def _robocasa_task_env(task_name):
 
 
 train_dataloader = dict(
-    # With 16 GPUs and no gradient accumulation this gives global batch 32.
+    # Global batch is 2 x world size (128 on 64 GPUs).
     per_device_batch_size=2,
     per_device_num_workers=4,
     dataset=dict(
@@ -186,9 +194,16 @@ train_dataloader = dict(
                 ),
                 dict(
                     type='RobocasaGR1N15Bridge',
+                    # DreamZero's released ``gr1_unified`` transform applies
+                    # group-wise sin/cos encoding to the GR1 joint state.
                     apply_state_sincos=True,
                 ),
-                dict(type='ParquetPrompter', use_conversation=False),
+                dict(
+                    type='ParquetPrompter',
+                    use_conversation=False,
+                    lowercase_task_description=True,
+                    prompt_template=_PROMPT_TEMPLATE,
+                ),
                 dict(
                     type='ProcessPrompts',
                     tokenizer=dict(
@@ -202,7 +217,11 @@ train_dataloader = dict(
                     scale=0.95,
                     consistent=True,
                 ),
-                dict(type='ResizeImages', height=128, width=128),
+                dict(
+                    type='ResizeImages',
+                    height=_IMAGE_SIZE,
+                    width=_IMAGE_SIZE,
+                ),
                 dict(
                     type='ColorJitterImages',
                     brightness=0.3,
@@ -220,8 +239,11 @@ train_dataloader = dict(
                     action_key='action',
                     norm_type='min_max',
                     clip_norm=True,
-                    # Official DreamZero ``gr1_unified`` encodes every raw
-                    # joint state as sin/cos and only normalizes actions.
+                    # Match DreamZero: constant min/max action dimensions are
+                    # represented by zero rather than the lower endpoint.
+                    zero_constant_min_max_dims=True,
+                    # Sin/cos state features are already bounded and are not
+                    # normalized again in the released DreamZero transform.
                     normalize_states=False,
                 ),
                 dict(
@@ -230,7 +252,10 @@ train_dataloader = dict(
                     frame_window_size=_FRAME_WINDOW_SIZE,
                 ),
             ],
-            action_window_size=10,
+            # Cache inference consumes one ten-step block per call, while
+            # training exposes two blocks so cross-block causal attention is
+            # supervised rather than first encountered during evaluation.
+            action_window_size=20,
             action_key='action',
             # DreamZero's released ``gr1_unified`` contract uses absolute
             # joint targets. Its relative-action key list is specific to the
@@ -294,6 +319,7 @@ eval = dict(
     model_family='dreamzero',
     task_list=[_robocasa_task_env(task_name) for task_name in _ROBOCASA_TASKS],
     total_tasks=24,
+    # Execute the same ten-step chunk used during training.
     eval_chunk_size=10,
     max_episode_steps=720,
     # Match the reported RoboCasa protocol: 24 tasks x 50 trials = 1200
@@ -308,14 +334,13 @@ eval = dict(
         type='RobocasaEvalDataset',
         unnorm_key=_ROBOCASA_STATISTIC_NAME,
         # First request warms the cache with one frame. Later requests expose
-        # four recent observations, which DreamZero expands to the nine-frame
-        # video layout used during training.
+        # the four latest observations, as in LIBERO cached evaluation.
         img_buffer_len=4,
         transforms=[
             dict(
                 type='ProcessRobocasaEvalInputs',
                 img_key='video.ego_view_bg_crop_pad_res256_freq20',
-                resize_size=128,
+                resize_size=_IMAGE_SIZE,
                 center_crop_scale=0.95,
                 normalize=True,
                 value_range='tanh',
@@ -334,7 +359,12 @@ eval = dict(
                 clip_norm=True,
                 normalize_states=False,
             ),
-            dict(type='ParquetPrompter', use_conversation=False),
+            dict(
+                type='ParquetPrompter',
+                use_conversation=False,
+                lowercase_task_description=True,
+                prompt_template=_PROMPT_TEMPLATE,
+            ),
             dict(
                 type='ProcessPrompts',
                 tokenizer=dict(
