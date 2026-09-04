@@ -338,8 +338,10 @@ class ParquetDataset(Dataset):
             return True
 
         if self.require_full_window:
-            window_size = max(self.frame_window_size,
-                              self.window_start_idx + self.action_window_size)
+            frame_span = 1 + (self.frame_window_size -
+                              1) * self.frame_sample_stride
+            action_span = self.window_start_idx + self.action_window_size
+            window_size = max(frame_span, action_span)
             if not self._same_episode_and_dataset(index + window_size - 1,
                                                   dataset_idx, data):
                 return True

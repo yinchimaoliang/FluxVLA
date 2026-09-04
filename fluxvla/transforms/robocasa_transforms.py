@@ -93,10 +93,9 @@ class RobocasaGR1N15Bridge:
     The current FluxVLA parquet/eval bridge stores GR1 vectors as
     left_arm + left_hand + right_arm + right_hand + waist. Official N1.5
     RoboCasa uses left_arm + right_arm + left_hand + right_hand + waist.
-    GR00T's ``gr1_unified`` recipe additionally applies sin/cos to state,
-    while DreamZero's RoboCasa recipe keeps raw state and min-max normalizes
-    it. This transform supports both contracts and keeps flat state/action
-    statistics aligned with the reordered vectors.
+    GR00T and DreamZero can additionally apply sin/cos encoding to state.
+    This transform supports both encoded and raw-state contracts and keeps
+    flat state/action statistics aligned with the reordered vectors.
 
     Args:
         source_order: Source flat vector order. Only ``fluxvla`` is supported.

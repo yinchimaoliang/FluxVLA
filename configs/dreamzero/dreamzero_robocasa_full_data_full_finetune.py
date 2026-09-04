@@ -33,11 +33,13 @@ Example for two 8-GPU nodes sharing MASTER_ADDR and MASTER_PORT:
 _CKPT_ROOT = './checkpoints'
 _TOKENIZER = _CKPT_ROOT + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
 
-# Seventeen raw frames become five VAE latent frames: one conditioning frame
-# and two two-frame dynamics blocks paired with two ten-step action chunks.
-# This is the cached-training contract used by the validated DreamZero LIBERO
-# recipes; training only one block leaves cross-block cache attention unseen.
-_FRAME_WINDOW_SIZE = 17
+# The checkpoint supports four causal chunks (33 raw frames). Each training
+# sample uses one complete chunk: nine frames at offsets [0, 6, ..., 48]
+# paired with 48 consecutive actions.
+_MODEL_NUM_FRAMES = 33
+_TRAIN_FRAME_WINDOW_SIZE = 9
+_FRAME_SAMPLE_STRIDE = 6
+_ACTION_HORIZON = 48
 _NUM_VIEWS = 1
 _IMAGE_SIZE = 256
 _FRAME_SEQUENCE_LENGTH = (_IMAGE_SIZE // 16)**2
@@ -53,12 +55,18 @@ _NEGATIVE_PROMPT = (
 model = dict(
     type='DreamZeroVLA',
     num_views=_NUM_VIEWS,
-    frame_window_size=_FRAME_WINDOW_SIZE,
+    frame_window_size=_MODEL_NUM_FRAMES,
     pretrained_name_or_path=  # noqa: E251
     _CKPT_ROOT + '/DreamZero-AgiBot',
-    # RoboCasaEvalDataset keeps the recent observation history expected by
-    # DreamZero's causal real-world inference path.
+    # Keep DreamZero's causal inference implementation enabled. RoboCasa
+    # supplies one current frame per request, which resets the cache exactly
+    # as in the released simulator evaluation path.
     use_cache=True,
+    # Upstream cached inference pre-fills the KV cache with the first latent
+    # produced by the image-conditioning encoder, not a separately encoded
+    # one-frame video. Keep this opt-in so existing LIBERO configs are
+    # unchanged.
+    use_image_condition_for_cache_prefill=True,
     vlm_backbone=dict(
         type='Wan21Backbone',
         text_encoder_path=None,
@@ -72,11 +80,11 @@ model = dict(
         # its checkpoint-compatible internal action width of 32.
         action_dim=29,
         max_action_dim=32,
-        action_horizon=10,
+        action_horizon=_ACTION_HORIZON,
         max_state_dim=64,
-        num_frames=_FRAME_WINDOW_SIZE,
+        num_frames=_MODEL_NUM_FRAMES,
         num_frame_per_block=2,
-        num_action_per_block=10,
+        num_action_per_block=_ACTION_HORIZON,
         num_state_per_block=1,
         # One 256x256 view -> 32x32 VAE latent -> 16x16 DiT patch grid.
         # This matches the released DreamZero ``gr1_unified`` transform.
@@ -97,12 +105,19 @@ model = dict(
         # The released DreamZero inference implementation uses 16 denoising
         # steps, irrespective of the stale value in its checkpoint config.
         num_inference_steps=16,
+        # Match released cached inference: video and action noise are sampled
+        # from separate generators initialized with this fixed seed.
+        inference_seed=1140,
+        # The released implementation keeps all 16 scheduler updates but runs
+        # the DiT on this fixed eight-step subset, reusing the latest velocity
+        # prediction on the remaining updates.
+        num_dit_compute_steps=8,
         use_gradient_checkpointing=True,
         cfg_scale=5.0,
         validate_action_range=True,
-        # Keep the two-block window used when this RoboCasa checkpoint was
-        # trained. Changing it at evaluation changes the causal attention mask.
-        max_chunk_size=2,
+        # Match the local-attention window in the released checkpoint. A
+        # training sample below still contains one complete action block.
+        max_chunk_size=4,
     ),
     name_mapping={
         'vla_head.model': 'action_head.model',
@@ -249,13 +264,11 @@ train_dataloader = dict(
                 dict(
                     type='PrepareVideo',
                     num_views=_NUM_VIEWS,
-                    frame_window_size=_FRAME_WINDOW_SIZE,
+                    frame_window_size=_TRAIN_FRAME_WINDOW_SIZE,
                 ),
             ],
-            # Cache inference consumes one ten-step block per call, while
-            # training exposes two blocks so cross-block causal attention is
-            # supervised rather than first encountered during evaluation.
-            action_window_size=20,
+            # Match one complete block from the released DreamZero sampler.
+            action_window_size=_ACTION_HORIZON,
             action_key='action',
             # DreamZero's released ``gr1_unified`` contract uses absolute
             # joint targets. Its relative-action key list is specific to the
@@ -263,7 +276,9 @@ train_dataloader = dict(
             use_delta=False,
             statistic_name=_ROBOCASA_STATISTIC_NAME,
             window_start_idx=0,
-            frame_window_size=_FRAME_WINDOW_SIZE,
+            frame_window_size=_TRAIN_FRAME_WINDOW_SIZE,
+            frame_sample_stride=_FRAME_SAMPLE_STRIDE,
+            require_full_window=True,
         ),
     ),
 )
@@ -319,8 +334,8 @@ eval = dict(
     model_family='dreamzero',
     task_list=[_robocasa_task_env(task_name) for task_name in _ROBOCASA_TASKS],
     total_tasks=24,
-    # Execute the same ten-step chunk used during training.
-    eval_chunk_size=10,
+    # The released simulator client executes eight actions before replanning.
+    eval_chunk_size=8,
     max_episode_steps=720,
     # Match the reported RoboCasa protocol: 24 tasks x 50 trials = 1200
     # episodes in total.
@@ -333,12 +348,13 @@ eval = dict(
     dataset=dict(
         type='RobocasaEvalDataset',
         unnorm_key=_ROBOCASA_STATISTIC_NAME,
-        # First request warms the cache with one frame. Later requests expose
-        # the four latest observations, as in LIBERO cached evaluation.
-        img_buffer_len=4,
+        # The released RoboCasa contract provides only the current frame.
+        img_buffer_len=1,
         transforms=[
             dict(
                 type='ProcessRobocasaEvalInputs',
+                # The converted ``observation.images.ego_view`` videos use the
+                # co-training crop produced by ``process_img_cotrain``.
                 img_key='video.ego_view_bg_crop_pad_res256_freq20',
                 resize_size=_IMAGE_SIZE,
                 center_crop_scale=0.95,

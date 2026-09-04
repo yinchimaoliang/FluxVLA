@@ -65,6 +65,7 @@ class DreamZeroVLA(BaseVLA):
         freeze_vlm_backbone: bool = True,
         freeze_projector: bool = True,
         use_cache: bool = True,
+        use_image_condition_for_cache_prefill: bool = False,
         *args,
         **kwargs,
     ) -> None:
@@ -81,6 +82,8 @@ class DreamZeroVLA(BaseVLA):
         self.num_views = num_views
         self.frame_window_size = frame_window_size
         self.use_cache = use_cache
+        self.use_image_condition_for_cache_prefill = (
+            use_image_condition_for_cache_prefill)
         self.vla_head.use_cache = use_cache
         self.all_module_keys = ['vlm_backbone', 'vla_head']
 
@@ -262,6 +265,7 @@ class DreamZeroVLA(BaseVLA):
         states: torch.Tensor,
         embodiment_ids: Optional[torch.Tensor] = None,
         reset_history: bool = False,
+        seed: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         device = images.device
@@ -305,13 +309,21 @@ class DreamZeroVLA(BaseVLA):
             self.vlm_backbone.set_frozen_modules_to_eval_mode()
             prompt_embs = self._encode_wan_prompts(
                 lang_tokens.to(device), lang_masks.to(device))
-            latents = self.vlm_backbone.encode_video(video_for_latents)
-            clip_feas, image_cond, _ = self.vlm_backbone.encode_image(
-                condition_image.transpose(1, 2),
-                self.frame_window_size,
-                h,
-                w,
-            )
+            clip_feas, image_cond, condition_latent = (
+                self.vlm_backbone.encode_image(
+                    condition_image.transpose(1, 2),
+                    self.frame_window_size,
+                    h,
+                    w,
+                ))
+            if (initial_cache_fill
+                    and self.use_image_condition_for_cache_prefill):
+                # ``lazy_joint_video_action`` in DreamZero pre-fills its KV
+                # cache with the latent returned by encode_image(). Reusing it
+                # also avoids a redundant one-frame VAE encode on reset.
+                latents = condition_latent
+            else:
+                latents = self.vlm_backbone.encode_video(video_for_latents)
             observed_latent_frames = latents.shape[2]
         else:
             # Stateless inference keeps the previous behavior: pad video to the
@@ -361,6 +373,7 @@ class DreamZeroVLA(BaseVLA):
             states=states,
             embodiment_ids=embodiment_ids,
             reset_history=reset_history,
+            seed=seed,
         )
         if self.use_cache:
             head_kwargs['observed_latent_frames'] = observed_latent_frames

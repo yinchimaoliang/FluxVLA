@@ -145,6 +145,8 @@ class DreamZeroHead(nn.Module):
         cfg_scale: float = 1.0,
         validate_action_range: bool = False,
         max_chunk_size: int = -1,
+        inference_seed: Optional[int] = None,
+        num_dit_compute_steps: Optional[int] = None,
         *args,
         **kwargs,
     ):
@@ -166,6 +168,8 @@ class DreamZeroHead(nn.Module):
         self.cfg_scale = cfg_scale
         self.validate_action_range = validate_action_range
         self.max_chunk_size = max_chunk_size
+        self.inference_seed = inference_seed
+        self.num_dit_compute_steps = num_dit_compute_steps
 
         # ----- build DiT model -----
         self.model = CausalWanModel(
@@ -559,6 +563,7 @@ class DreamZeroHead(nn.Module):
         latents_dtype: torch.dtype,
         latents_shape: tuple[int, int, int, int],
         num_inference_steps: int,
+        inference_seed: Optional[int] = None,
     ) -> torch.Tensor:
         scheduler_module = import_module(
             'fluxvla.models.third_party_models.dreamzero.modules.'
@@ -574,22 +579,28 @@ class DreamZeroHead(nn.Module):
         num_state_tokens = num_action_blocks * self.num_state_per_block
         states = states[:, :num_state_tokens].to(torch.bfloat16)
 
-        noisy_latents = torch.randn(
-            b,
-            num_channels,
-            denoise_frames,
-            lat_h,
-            lat_w,
-            device=device,
-            dtype=latents_dtype,
-        )
-        noisy_actions = torch.randn(
-            b,
-            self.action_horizon,
-            self.max_action_dim,
-            device=device,
-            dtype=latents_dtype,
-        )
+        seed = (
+            self.inference_seed if inference_seed is None else inference_seed)
+
+        def generate_noise(shape):
+            generator = None
+            if seed is not None:
+                generator = torch.Generator(device=device).manual_seed(seed)
+            return torch.randn(
+                shape,
+                generator=generator,
+                device=device,
+                dtype=latents_dtype,
+            )
+
+        # Upstream DreamZero starts video and action sampling from separate
+        # generators initialized with the same fixed seed. Do not share one
+        # generator here: doing so changes the action noise whenever the video
+        # resolution or number of denoised frames changes.
+        noisy_latents = generate_noise(
+            (b, num_channels, denoise_frames, lat_h, lat_w))
+        noisy_actions = generate_noise(
+            (b, self.action_horizon, self.max_action_dim))
 
         sample_scheduler = FlowUniPCMultistepScheduler(
             num_train_timesteps=self.scheduler.num_train_timesteps,
@@ -633,6 +644,8 @@ class DreamZeroHead(nn.Module):
             y_future = ys[:, :, -denoise_frames:]
         prompt_embs = self._as_prompt_emb_list(prompt_embs)
         use_cfg = self.cfg_scale != 1.0 and len(prompt_embs) > 1
+        dit_step_mask = self._build_dit_step_mask(num_inference_steps)
+        previous_prediction = None
 
         for step_index in range(len(sample_scheduler.timesteps)):
             video_timestep = sample_scheduler.timesteps[step_index]
@@ -641,28 +654,32 @@ class DreamZeroHead(nn.Module):
             t_video = video_timestep.expand(b, denoise_frames)
             t_action = action_timestep.expand(b, self.action_horizon)
 
-            predictions = self._single_flowmatching_step(
-                prompt_embs=prompt_embs,
-                reference_latents=noisy_latents,
-                clip_feas=clip_feas,
-                ys=y_future,
-                start_frame=current_start_frame,
-                kv_caches=[kv_cache, kv_cache_neg],
-                crossattn_caches=[crossattn_cache, crossattn_cache_neg],
-                timestep=t_video,
-                timestep_action=t_action,
-                action=noisy_actions,
-                state=states,
-                embodiment_id=embodiment_ids,
-                update_cache=False,
-            )
-            flow_pred_cond, flow_pred_cond_action = predictions[0]
-            flow_pred = flow_pred_cond
+            if dit_step_mask[step_index] or previous_prediction is None:
+                predictions = self._single_flowmatching_step(
+                    prompt_embs=prompt_embs,
+                    reference_latents=noisy_latents,
+                    clip_feas=clip_feas,
+                    ys=y_future,
+                    start_frame=current_start_frame,
+                    kv_caches=[kv_cache, kv_cache_neg],
+                    crossattn_caches=[crossattn_cache, crossattn_cache_neg],
+                    timestep=t_video,
+                    timestep_action=t_action,
+                    action=noisy_actions,
+                    state=states,
+                    embodiment_id=embodiment_ids,
+                    update_cache=False,
+                )
+                flow_pred_cond, flow_pred_cond_action = predictions[0]
+                flow_pred = flow_pred_cond
 
-            if use_cfg:
-                flow_pred_uncond, _ = predictions[1]
-                flow_pred = flow_pred_uncond + self.cfg_scale * (
-                    flow_pred_cond - flow_pred_uncond)
+                if use_cfg:
+                    flow_pred_uncond, _ = predictions[1]
+                    flow_pred = flow_pred_uncond + self.cfg_scale * (
+                        flow_pred_cond - flow_pred_uncond)
+                previous_prediction = (flow_pred, flow_pred_cond_action)
+            else:
+                flow_pred, flow_pred_cond_action = previous_prediction
 
             noisy_latents = sample_scheduler.step(
                 model_output=flow_pred.float(),
@@ -684,6 +701,45 @@ class DreamZeroHead(nn.Module):
 
         return noisy_actions
 
+    def _build_dit_step_mask(self, num_inference_steps: int) -> list[bool]:
+        """Return the released DreamZero sparse DiT schedule.
+
+        DreamZero always performs 16 scheduler updates, but its released
+        inference path evaluates the DiT on only 5--8 selected updates and
+        reuses the latest velocity prediction for skipped updates. Leave the
+        optimization disabled when ``num_dit_compute_steps`` is unset so
+        existing configs retain their current behavior.
+        """
+        if self.num_dit_compute_steps is None:
+            return [True] * num_inference_steps
+        if num_inference_steps != 16:
+            raise ValueError(
+                'DreamZero sparse DiT schedules require exactly 16 '
+                f'inference steps, got {num_inference_steps}.')
+        masks = {
+            5: [
+                True, True, True, False, False, False, False, True, False,
+                False, False, False, True, False, False, False
+            ],
+            6: [
+                True, True, False, False, False, True, False, False, False,
+                False, True, False, False, False, True, True
+            ],
+            7: [
+                True, True, True, False, False, False, True, False, False,
+                False, True, False, False, False, True, True
+            ],
+            8: [
+                True, True, True, False, False, False, True, False, False,
+                False, True, False, False, True, True, True
+            ],
+        }
+        if self.num_dit_compute_steps not in masks:
+            raise ValueError(
+                'num_dit_compute_steps must be one of 5, 6, 7, or 8, got '
+                f'{self.num_dit_compute_steps}.')
+        return masks[self.num_dit_compute_steps]
+
     def _predict_action_stateless(
         self,
         prompt_embs: torch.Tensor,
@@ -694,6 +750,7 @@ class DreamZeroHead(nn.Module):
         embodiment_ids: torch.Tensor,
         num_inference_steps: int,
         observed_latent_frames: int,
+        inference_seed: Optional[int] = None,
     ) -> torch.Tensor:
         local_kv_cache, local_kv_cache_neg = self._create_cache_pair(
             batch_size=states.shape[0],
@@ -745,6 +802,7 @@ class DreamZeroHead(nn.Module):
                 int(latents.shape[3] * latents.shape[4] / 4),
             ),
             num_inference_steps=num_inference_steps,
+            inference_seed=inference_seed,
         )
 
     # ------------------------------------------------------------------
@@ -761,6 +819,7 @@ class DreamZeroHead(nn.Module):
         num_inference_steps: Optional[int] = None,
         observed_latent_frames: Optional[int] = None,
         reset_history: bool = False,
+        seed: Optional[int] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Joint video+action denoising with persistent causal history."""
@@ -788,6 +847,7 @@ class DreamZeroHead(nn.Module):
                 embodiment_ids=embodiment_ids,
                 num_inference_steps=num_inference_steps,
                 observed_latent_frames=observed_latent_frames,
+                inference_seed=seed,
             )
         else:
             device = states.device
@@ -898,6 +958,7 @@ class DreamZeroHead(nn.Module):
                 latents_dtype=latents.dtype,
                 latents_shape=latents_shape,
                 num_inference_steps=num_inference_steps,
+                inference_seed=seed,
             )
 
             self.current_start_frame += denoise_frames
