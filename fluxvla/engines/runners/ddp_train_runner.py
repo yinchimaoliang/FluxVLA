@@ -254,9 +254,25 @@ class DDPTrainRunner(BaseTrainRunner):
             # Collect checkpoint layer classes (same as FSDP)
             checkpoint_layer_classes = set()
 
+            def add_checkpoint_layer_classes(value) -> None:
+                if isinstance(value, type) and issubclass(value, nn.Module):
+                    checkpoint_layer_classes.add(value)
+                elif isinstance(value, (list, tuple, set)):
+                    for layer_cls in value:
+                        if (isinstance(layer_cls, type)
+                                and issubclass(layer_cls, nn.Module)):
+                            checkpoint_layer_classes.add(layer_cls)
+
             # Add LLM backbone transformer layers
             if hasattr(self, 'llm_transformer_layer_cls'):
-                checkpoint_layer_classes.add(self.llm_transformer_layer_cls)
+                add_checkpoint_layer_classes(self.llm_transformer_layer_cls)
+
+            # Model-specific layers such as DreamZero's DiT blocks are not
+            # exposed as an LLM/VLM ``transformer_layer_cls``.
+            get_model_checkpoint_classes = getattr(
+                self.vla, 'get_activation_checkpointing_layer_classes', None)
+            if callable(get_model_checkpoint_classes):
+                add_checkpoint_layer_classes(get_model_checkpoint_classes())
 
             # Add Vision Transformer blocks (for timm models)
             try:
@@ -269,7 +285,7 @@ class DDPTrainRunner(BaseTrainRunner):
             if hasattr(self.vla,
                        'llm_expert') and self.vla.llm_expert is not None:
                 if hasattr(self.vla.llm_expert, 'transformer_layer_cls'):
-                    checkpoint_layer_classes.add(
+                    add_checkpoint_layer_classes(
                         self.vla.llm_expert.transformer_layer_cls)
 
             # Apply checkpoint wrapper if we have layer classes

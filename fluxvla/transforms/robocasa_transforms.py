@@ -288,9 +288,8 @@ class ProcessRobocasaEvalInputs:
             else:
                 history = np.asarray(history)
                 if history.ndim != 4 or history.shape[-1] != 3:
-                    raise ValueError(
-                        f'{self.history_key} must have shape [T,H,W,3], got '
-                        f'{history.shape}')
+                    raise ValueError(f'{self.history_key} must have shape '
+                                     f'[T, H, W, 3], got {history.shape}')
                 images = list(history)
 
             processed_images = []
@@ -463,6 +462,77 @@ class DenormalizeRobocasaAction:
             action = np.clip(action, -1.0, 1.0)
         # Min-max denormalization: action in [-1, 1] -> [low, high].
         return 0.5 * (action + 1) * (high - low) + low
+
+
+@TRANSFORMS.register_module()
+class DenormalizeRobocasaDeltaAction(DenormalizeRobocasaAction):
+    """Restore mixed RoboCasa joint deltas to absolute joint commands.
+
+    DreamZero and OpenPI adapt to new embodiments by predicting arm/waist
+    deltas while leaving Fourier-hand commands absolute.  RoboCasa exposes
+    the current state in FluxVLA order, whereas DreamZero uses official N1.5
+    order, so the state must be reordered before selected dimensions are
+    added back.
+    """
+
+    def __init__(self,
+                 delta_action_mask: List[bool],
+                 state_order: str = 'fluxvla',
+                 action_order: str = 'n15',
+                 *args,
+                 **kwargs):
+        super().__init__(*args, **kwargs)
+        self.delta_action_mask = np.asarray(delta_action_mask, dtype=bool)
+        if self.delta_action_mask.ndim != 1:
+            raise ValueError('delta_action_mask must be one-dimensional')
+        if state_order not in ('fluxvla', 'n15'):
+            raise ValueError(
+                f'Unsupported state_order={state_order}. Expected '
+                "'fluxvla' or 'n15'.")
+        if action_order not in ('fluxvla', 'n15'):
+            raise ValueError(
+                f'Unsupported action_order={action_order}. Expected '
+                "'fluxvla' or 'n15'.")
+        self.state_order = state_order
+        self.action_order = action_order
+        self.state_permutation = (
+            np.array(
+                _robocasa_gr1_permutation(ROBOCASA_GR1_FLUXVLA_ORDER),
+                dtype=np.int64)
+            if state_order == 'fluxvla' and action_order == 'n15' else None)
+        if state_order != action_order and self.state_permutation is None:
+            raise ValueError(
+                f'Unsupported state/action order conversion: {state_order} '
+                f'-> {action_order}.')
+
+    def __call__(self, data: Dict) -> np.ndarray:
+        action = np.asarray(super().__call__(data), dtype=np.float32)
+        state = data.get('state')
+        if state is None:
+            raise ValueError(
+                'Current raw RoboCasa state is required to restore delta '
+                'actions.')
+        state = np.asarray(state, dtype=np.float32)
+        if state.ndim == 2 and state.shape[0] == 1:
+            state = state[0]
+        if state.ndim != 1:
+            raise ValueError(
+                f'Current robot state must have shape [D], got {state.shape}.')
+        if self.state_permutation is not None:
+            if state.shape[-1] < len(self.state_permutation):
+                raise ValueError(
+                    'Current robot state is shorter than the RoboCasa GR1 '
+                    f'permutation: {state.shape}.')
+            state = state[self.state_permutation]
+
+        dims = len(self.delta_action_mask)
+        if action.shape[-1] < dims or state.shape[-1] < dims:
+            raise ValueError(
+                f'Delta mask length {dims} exceeds action/state dimensions '
+                f'{action.shape[-1]}/{state.shape[-1]}.')
+        action[..., :dims] += np.where(self.delta_action_mask, state[:dims],
+                                       0.0)
+        return action
 
 
 @DATASETS.register_module()

@@ -11,41 +11,41 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Legacy absolute-action DreamZero fine-tuning on RoboCasa GR1.
+"""Aligned DreamZero adaptation on the RoboCasa GR1 tabletop tasks.
 
-Keep this config only for reproducing/evaluating checkpoints that were already
-trained with its 48-step absolute-action contract.  For a new run, use
-``dreamzero_robocasa_full_data_joint_delta_lora_finetune.py``; it follows the
-released DreamZero new-embodiment recipe (24-step mixed relative actions and
-LoRA) and avoids the low-loss action-persistence shortcut in this config.
+This is the recommended replacement for the legacy absolute-action/full-DiT
+recipe.  It follows DreamZero's released new-embodiment adaptation contract:
 
-The dataset layout, task list, and closed-loop evaluation setup follow
-``configs/pi05/pi05_paligemma_robocasa_full_data_full_finetune.py``. The
-DreamZero-specific video, tokenizer, and model settings follow the existing
-LIBERO recipe. RoboCasa vector ordering, state encoding, min-max action
-normalization, augmentation, and classifier-free guidance follow the released
-DreamZero data contract.
+* 24 actions paired with video offsets ``[0, 3, ..., 24]``;
+* arm and waist joint deltas, with Fourier-hand commands kept absolute;
+* rank-4 LoRA on the DiT plus trainable state/action encoders and decoder.
+
+The old ``dreamzero_robocasa_full_data_full_finetune.py`` remains available to
+reproduce and evaluate checkpoints that were already trained with 48-step
+absolute actions.  Those checkpoints are not compatible with this data
+contract and must not be evaluated with this config.
 
 Example for two 8-GPU nodes sharing MASTER_ADDR and MASTER_PORT:
     torchrun --nnodes=2 --nproc_per_node=8 \
         --node_rank=${NODE_RANK} --master_addr=${MASTER_ADDR} \
         --master_port=${MASTER_PORT} scripts/train.py \
         --config \
-        configs/dreamzero/dreamzero_robocasa_full_data_full_finetune.py \
+        configs/dreamzero/\
+dreamzero_robocasa_full_data_joint_delta_lora_finetune.py \
         --work-dir \
-        work_dirs/dreamzero_robocasa_full_data_full_finetune
+        work_dirs/dreamzero_robocasa_full_data_joint_delta_lora_finetune
 """
 
 _CKPT_ROOT = './checkpoints'
 _TOKENIZER = _CKPT_ROOT + '/Wan2.1-I2V-14B-480P/google/umt5-xxl'
 
-# The checkpoint supports four causal chunks (33 raw frames). Each training
-# sample uses one complete chunk: nine frames at offsets [0, 6, ..., 48]
-# paired with 48 consecutive actions.
+# The checkpoint supports four causal chunks (33 raw frames). New-embodiment
+# adaptation uses nine observations at offsets [0, 3, ..., 24], paired with
+# 24 consecutive actions, as in the released AgiBot/YAM training scripts.
 _MODEL_NUM_FRAMES = 33
 _TRAIN_FRAME_WINDOW_SIZE = 9
-_FRAME_SAMPLE_STRIDE = 6
-_ACTION_HORIZON = 48
+_FRAME_SAMPLE_STRIDE = 3
+_ACTION_HORIZON = 24
 _NUM_VIEWS = 1
 _IMAGE_SIZE = 256
 _FRAME_SEQUENCE_LENGTH = (_IMAGE_SIZE // 16)**2
@@ -73,6 +73,21 @@ model = dict(
     # one-frame video. Keep this opt-in so existing LIBERO configs are
     # unchanged.
     use_image_condition_for_cache_prefill=True,
+    # Official DreamZero adaptation freezes the pretrained DiT weights and
+    # learns rank-4 adapters, while keeping the embodiment-specific
+    # state/action encoders and action decoder trainable.
+    use_lora=True,
+    lora_rank=4,
+    lora_alpha=4,
+    lora_dropout=0.0,
+    lora_target_modules=(
+        r'^vla_head\.model\.blocks\.\d+\.(?:self_attn|cross_attn)\.'
+        r'(?:q|k|v|o)$|^vla_head\.model\.blocks\.\d+\.ffn\.(?:0|2)$'),
+    modules_to_save=[
+        'state_encoder',
+        'action_encoder',
+        'action_decoder',
+    ],
     vlm_backbone=dict(
         type='Wan21Backbone',
         text_encoder_path=None,
@@ -133,10 +148,173 @@ model = dict(
     },
 )
 
-_ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_30ep'
+_ROBOCASA_STATISTIC_NAME = 'robocasa_gr1_24tasks_joint_delta'
 _ROBOCASA_DATA_ROOT = './datasets/robocasa_lerobot_V2.1'
 _ROBOCASA_TASK_PREFIX = 'gr1_unified'
 _ROBOCASA_ENV_SUFFIX = '_GR1ArmsAndWaistFourierHands_Env'
+
+# Raw parquet order: left arm, left hand, right arm, right hand, waist.
+_ROBOCASA_JOINT_DELTA_MASK = ([True] * 7 + [False] * 6 + [True] * 7 +
+                              [False] * 6 + [True] * 3)
+# DreamZero model/evaluation order after RobocasaGR1N15Bridge: left arm,
+# right arm, left hand, right hand, waist.
+_ROBOCASA_N15_JOINT_DELTA_MASK = ([True] * 7 + [True] * 7 + [False] * 6 +
+                                  [False] * 6 + [True] * 3)
+
+# Exact statistics for the 24-step mixed-relative action contract,
+# computed from all 24 RoboCasa tasks / 24,000 episodes. Keeping them
+# inline avoids a long rank-0 preprocessing pass and NCCL barrier timeout.
+_ROBOCASA_DATASET_STATISTICS = {
+    'robocasa_gr1_24tasks_joint_delta': {
+        'proprio': {
+            'mean': [
+                -0.17102599661893628, 0.23514659219974143,
+                -0.11291017724516655, -1.4712459937182183, 0.17786245443243578,
+                0.10149730971890933, -0.006413776953445108, 0.1501827995845328,
+                0.1494419544656495, 0.13239416445355168, 0.14923437345912333,
+                0.03464704927460434, 0.6337165986729069, -0.32031619897959673,
+                -0.3216767278879253, 0.08499577598004783, -1.4728465043313443,
+                0.337759733973541, 0.0690973699961625, 0.16150938097923964,
+                0.48730800244509526, 0.4577669563030523, 0.42192603277520035,
+                0.4522622699974382, 0.07554572365544217, 1.6688002354105917,
+                0.0035976467848950486, 0.004405950191815653,
+                -8.76750048624244e-05
+            ],
+            'std': [
+                0.37524638882030775, 0.17814931412288376, 0.2653912135335837,
+                0.46622207697619644, 0.2902881388466011, 0.2859473255400859,
+                0.3154311391865683, 0.41833180143882503, 0.40040645672050007,
+                0.35368029790605027, 0.4026344337142858, 0.13890309096880296,
+                0.8191262033029768, 0.5024563669478592, 0.2778612776919975,
+                0.37864273716884367, 0.6704838466386019, 0.5231829479691116,
+                0.3766345142460483, 0.5706149895448006, 0.5937571234710008,
+                0.5513828952053532, 0.506991319063774, 0.5441043791035441,
+                0.17027079980800192, 0.21279093629856186, 0.06621792097846523,
+                0.01964003934576096, 0.007552978323748122
+            ],
+            'min': [
+                -1.6789460182189941, -0.026101894676685333,
+                -1.3480229377746582, -2.5160419940948486, -1.9940674304962158,
+                -1.3795876502990723, -1.1958755254745483, -1.4389894008636475,
+                -1.8303323984146118, -2.4635109901428223, -1.7167329788208008,
+                -2.218892812728882, -1.526924967765808, -2.0664756298065186,
+                -2.1021976470947266, -2.296651601791382, -2.5318210124969482,
+                -3.0013694763183594, -1.4908946752548218, -1.2908861637115479,
+                -1.4716511964797974, -2.0171985626220703, -2.412123203277588,
+                -1.189025640487671, -0.8325809836387634, -0.21484142541885376,
+                -0.5222951769828796, -0.42820972204208374, -0.39791223406791687
+            ],
+            'max': [
+                1.3502349853515625, 1.2633577585220337, 1.2589013576507568,
+                0.001734813442453742, 2.521491289138794, 1.526998519897461,
+                1.496475338935852, 2.0179455280303955, 2.009377956390381,
+                2.6196515560150146, 1.8978251218795776, 3.2151029109954834,
+                2.7924649715423584, 1.5148204565048218, 0.003278259886428714,
+                1.7851011753082275, 0.0016116079641506076, 3.0015335083007812,
+                1.4080945253372192, 1.4516682624816895, 2.7859506607055664,
+                2.1664254665374756, 3.0131356716156006, 2.69866681098938,
+                1.4733597040176392, 2.079848289489746, 0.937696099281311,
+                0.3457968235015869, 0.47687003016471863
+            ],
+            'q01': [
+                -1.414753302335739, -0.0005171521747251973,
+                -0.9782302141189575, -2.477926731109619, -0.34331061780452726,
+                -0.6772882187366486, -0.9085569721460343, -0.2537090674042702,
+                -0.01579869568347931, -0.010405048383399845,
+                -0.002593582069966942, -0.14740002006292344,
+                -0.0005192354379687458, -1.4483043837547303,
+                -1.0833211290836333, -0.8002108770608902, -2.507189002037048,
+                -0.7147443491220474, -0.9463434845209122, -1.0013096010684968,
+                -0.004114496670663357, -0.004300017701461911,
+                -0.0054274908918887374, -0.004352558837272227,
+                -0.13891243800520897, 0.5844185560941696, -0.2750973534584045,
+                -0.031067517586052418, -0.022482833340764046
+            ],
+            'q99': [
+                0.7154520624876013, 0.7829802078008643, 0.4349772733449915,
+                -0.170762614309788, 1.0356361699104308, 0.8310365939140318,
+                0.7348084545135478, 1.500377825498581, 1.4995973110198975,
+                1.2963906359672546, 1.5020229816436768, 0.6279667210578896,
+                1.846041305065155, 0.9360333341360092, -0.00022184939269209443,
+                0.8936860918998715, -0.08954395778477237, 1.5831496250629415,
+                0.8285187083482737, 1.232260091304779, 1.497841477394104,
+                1.4997276926040648, 1.5635861182212825, 1.518557515144348,
+                0.6836496728658665, 1.8118253779411315, 0.2004491922259326,
+                0.08782679289579387, 0.022298754360526682
+            ],
+            'count':
+            6020058
+        },
+        'action': {
+            'mean': [
+                -0.009214382580729107, -0.008712207598760227,
+                0.0028056072967646613, 0.013662939325045078,
+                8.582446510216132e-05, -0.009820096883617136,
+                -0.001631907141514234, -0.21731578963861437,
+                -0.21731578963861437, -0.21731578963861437,
+                -0.21731578963861437, -0.43463157927722873, 1.1291277003122182,
+                -0.036858917356646946, -0.006458900745127183,
+                -0.02505556679557638, 0.044850384472803984,
+                0.026545887866965705, 0.005072288479375176,
+                0.01952781587349067, -0.4750786377853427, -0.4750786377853427,
+                -0.4750786377853427, -0.4750786377853427, -0.9501572755706854,
+                3.0, 0.00048485272605788333, 0.002588117780747494,
+                1.2864913478592177e-05
+            ],
+            'std': [
+                0.12428913729168067, 0.061947062792788575, 0.0944412748544423,
+                0.17272552121597168, 0.09978729422790482, 0.10598432729495219,
+                0.11319969007553182, 0.8942145260357015, 0.8942145260357015,
+                0.8942145260357015, 0.8942145260357015, 1.788429052071403,
+                1.4534282718792289, 0.21658750934038998, 0.14868284373253013,
+                0.18060408439749426, 0.29878908422589107, 0.22515418628709333,
+                0.21927060992832306, 0.2826972122626373, 1.4227790711888844,
+                1.4227790711888844, 1.4227790711888844, 1.4227790711888844,
+                2.8455581423777687, 0.0, 0.03647094811892615,
+                0.0132199972265246, 0.006882453346600453
+            ],
+            'min': [
+                -1.1532576084136963, -0.7710707187652588, -1.3112866878509521,
+                -1.5591628551483154, -1.6683788299560547, -1.3634177446365356,
+                -1.1948705911636353, -1.5, -1.5, -1.5, -1.5, -3.0, 0.0,
+                -1.482505440711975, -1.5787591934204102, -1.6719448566436768,
+                -1.9195635318756104, -1.7429898977279663, -1.7818541526794434,
+                -2.0731394290924072, -1.5, -1.5, -1.5, -1.5, -3.0, 3.0,
+                -0.4199202060699463, -0.26482921838760376, -0.2804606854915619
+            ],
+            'max': [
+                1.206160545349121, 1.0281989574432373, 1.18000328540802,
+                1.896183729171753, 1.784941554069519, 1.3858094215393066,
+                1.2729451656341553, 1.5, 1.5, 1.5, 1.5, 3.0, 3.0,
+                1.6917004585266113, 1.1616510152816772, 1.5212913751602173,
+                1.9471081495285034, 1.8994455337524414, 1.6273449659347534,
+                2.135958671569824, 1.5, 1.5, 1.5, 1.5, 3.0, 3.0,
+                0.4214596152305603, 0.28732696175575256, 0.3515920639038086
+            ],
+            'q01': [
+                -0.4285609748959541, -0.15905308991670608, -0.3703790333867073,
+                -0.5776357108354568, -0.27032649517059326, -0.3067216655611992,
+                -0.4100598746538162, -1.5, -1.5, -1.5, -1.5, -3.0, 0.0,
+                -0.689931880235672, -0.4814644780755043, -0.5751662904024124,
+                -0.7938064658641816, -0.5646731853485107, -0.6040554696321487,
+                -0.6687421852350235, -1.5, -1.5, -1.5, -1.5, -3.0, 3.0,
+                -0.1108991462737322, -0.03692713920027018,
+                -0.023431802336126566
+            ],
+            'q99': [
+                0.41350418865680716, 0.2414393600821496, 0.2361499720811846,
+                0.620225277543069, 0.3593881157040597, 0.41745162278413783,
+                0.37283100038766914, 1.5, 1.5, 1.5, 1.5, 3.0, 3.0,
+                0.5794540750980381, 0.38423311710357666, 0.4631571823358538,
+                0.9261428171396258, 0.7127108842134486, 0.6551499634981166,
+                0.9581202375888829, 1.5, 1.5, 1.5, 1.5, 3.0, 3.0,
+                0.11290151685476335, 0.042237360365688814, 0.020694109182804843
+            ],
+            'count':
+            137857392
+        }
+    }
+}
 
 _ROBOCASA_TASKS = [
     'PnPBottleToCabinetClose',
@@ -175,9 +353,14 @@ def _robocasa_task_env(task_name):
 
 
 train_dataloader = dict(
-    # Global batch is 2 x world size (128 on 64 GPUs).
-    per_device_batch_size=2,
-    per_device_num_workers=4,
+    # Match the released LoRA recipe: one sample per GPU and no accumulation.
+    # The effective global batch therefore equals the distributed world size.
+    per_device_batch_size=1,
+    # Keep decoding in the rank process.  Each DreamZero rank temporarily
+    # occupies about 90 GiB of host RAM while loading the 23B checkpoint;
+    # forking four persistent workers per rank from a debugpy launch can make
+    # PyAV abort natively (SIGABRT) before Python can emit a traceback.
+    per_device_num_workers=0,
     dataset=dict(
         type='DistributedRepeatingDataset',
         name_mappings={
@@ -186,9 +369,8 @@ train_dataloader = dict(
         },
         statistic_keys=['observation.state', 'timestamp', 'action'],
         statistic_name=_ROBOCASA_STATISTIC_NAME,
-        # Aggregate statistics from the same full 24-task dataset used below.
-        # The first-30-episode statistics previously used here do not match
-        # this training distribution.
+        # Exact full-data statistics for the transformed h24 targets.
+        dataset_statistics=_ROBOCASA_DATASET_STATISTICS,
         reshuffle_each_epoch=True,
         datasets=dict(
             type='ParquetDataset',
@@ -212,6 +394,17 @@ train_dataloader = dict(
                         'actions': ['actions'],
                     },
                     embodiment_id=0,
+                    # TorchCodec 0.7 is installed with torch 2.8 in the
+                    # FluxVLA environment.  It returns the same frames for
+                    # this dataset while avoiding torchvision's deprecated
+                    # PyAV VideoReader path seen immediately before SIGABRT.
+                    video_backend='torchcodec',
+                ),
+                dict(
+                    type='RelativeActions',
+                    mask=_ROBOCASA_JOINT_DELTA_MASK,
+                    state_key='states',
+                    action_key='actions',
                 ),
                 dict(
                     type='RobocasaGR1N15Bridge',
@@ -273,12 +466,11 @@ train_dataloader = dict(
                     frame_window_size=_TRAIN_FRAME_WINDOW_SIZE,
                 ),
             ],
-            # Match one complete block from the released DreamZero sampler.
+            # Match one complete new-embodiment block from DreamZero.
             action_window_size=_ACTION_HORIZON,
             action_key='action',
-            # DreamZero's released ``gr1_unified`` contract uses absolute
-            # joint targets. Its relative-action key list is specific to the
-            # AgiBot schema and does not match RoboCasa action keys.
+            # RelativeActions above performs state-relative conversion using
+            # the current observation, not the legacy action-to-action delta.
             use_delta=False,
             statistic_name=_ROBOCASA_STATISTIC_NAME,
             window_start_idx=0,
@@ -290,7 +482,7 @@ train_dataloader = dict(
 )
 
 runner = dict(
-    type='FSDPTrainRunner',
+    type='DDPTrainRunner',
     max_epochs=None,
     max_steps=100000,
     grad_accumulation_steps=1,
@@ -329,8 +521,6 @@ runner = dict(
     enable_gradient_checkpointing=True,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
-    sharding_strategy='full-shard',
-    change_key_name=False,
 )
 
 eval = dict(
@@ -404,9 +594,12 @@ eval = dict(
         ],
     ),
     denormalize_action=dict(
-        type='DenormalizeRobocasaAction',
+        type='DenormalizeRobocasaDeltaAction',
         norm_type='min_max',
         action_dim=29,
+        delta_action_mask=_ROBOCASA_N15_JOINT_DELTA_MASK,
+        state_order='fluxvla',
+        action_order='n15',
         # Flow matching is unconstrained, while the training targets are in
         # [-1, 1]. Avoid mapping early-checkpoint outliers to unsafe joints.
         clip_actions=True,

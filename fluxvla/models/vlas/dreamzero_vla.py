@@ -413,6 +413,15 @@ class DreamZeroVLA(BaseVLA):
             CLIPAttentionBlock,
         })
 
+    def get_activation_checkpointing_layer_classes(self) -> set[type]:
+        """Return trainable DiT blocks for activation checkpointing."""
+        from importlib import import_module
+
+        chunk = import_module(
+            'fluxvla.models.third_party_models.dreamzero.modules.'
+            'wan_video_dit_action_casual_chunk')
+        return {chunk.CausalWanAttentionBlock}
+
     @property
     def config(self):
         """DreamZero has no generative LLM, so we return a minimal config."""
