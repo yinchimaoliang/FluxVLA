@@ -76,6 +76,10 @@ class PI0FlowMatching(BaseVLA):
             ``legacy_power_ratio`` preserves existing FluxVLA recipes.
         loss_action_dim (int, optional): Number of padded action dimensions
             supervised by flow matching. Defaults to ``ori_action_dim``.
+        zero_padded_action_dims (bool): Keep dimensions beyond ori_action_dim
+            zero in flow inputs and denoising. Defaults to False (legacy).
+        trim_action_prediction (bool): Return only ori_action_dim dimensions
+            from predict_action. Defaults to False (legacy).
         openpi_fp32_flow (bool): Keep noise, actions, timestep projections,
             and the velocity head in FP32, matching OpenPI JAX. Gemma inputs
             are cast to BF16 at the model boundary.
@@ -116,6 +120,8 @@ class PI0FlowMatching(BaseVLA):
                  max_action_dim: int = 7,
                  ori_action_dim: int = None,
                  loss_action_dim: int = None,
+                 zero_padded_action_dims: bool = False,
+                 trim_action_prediction: bool = False,
                  num_steps: int = 10,
                  time_sampler: str = 'legacy_power_ratio',
                  time_beta_alpha: float = 1.5,
@@ -123,6 +129,11 @@ class PI0FlowMatching(BaseVLA):
                  openpi_fp32_flow: bool = False,
                  rtc_training_config: Optional[Dict] = None,
                  **kwargs):
+        if ((zero_padded_action_dims or trim_action_prediction)
+                and (ori_action_dim is None
+                     or not 0 < ori_action_dim <= max_action_dim)):
+            raise ValueError('Action padding/trimming requires ori_action_dim '
+                             'in [1, max_action_dim].')
         super(PI0FlowMatching, self).__init__(
             vision_backbone=vision_backbone,
             llm_backbone=llm_backbone,
@@ -180,6 +191,8 @@ class PI0FlowMatching(BaseVLA):
         self.strict_mapping = strict_mapping
         self.max_action_dim = max_action_dim
         self.ori_action_dim = ori_action_dim
+        self.zero_padded_action_dims = bool(zero_padded_action_dims)
+        self.trim_action_prediction = bool(trim_action_prediction)
         self.loss_action_dim = (
             ori_action_dim
             if loss_action_dim is None else int(loss_action_dim))
@@ -260,6 +273,19 @@ class PI0FlowMatching(BaseVLA):
                 f'loss_action_dim={self.loss_action_dim}.')
         return (prediction[..., :self.loss_action_dim],
                 target[..., :self.loss_action_dim])
+
+    def _mask_padded_action_dims(self, values: torch.Tensor) -> torch.Tensor:
+        """Opt-in padding mask without modifying caller-owned tensors.
+
+        Legacy PI0/PI05 recipes retain noise in padded dimensions. Expanded
+        action-space recipes can keep those dimensions zero during both flow
+        training and denoising, independently of the loss dimension selection.
+        """
+        if (getattr(self, 'zero_padded_action_dims', False)
+                and self.ori_action_dim < values.shape[-1]):
+            return F.pad(values[..., :self.ori_action_dim],
+                         (0, values.shape[-1] - self.ori_action_dim))
+        return values
 
     def get_attention_interface(self):
         if self.attention_implementation == 'sdpa':
@@ -657,6 +683,9 @@ class PI0FlowMatching(BaseVLA):
             noise = noise.float()
             time = time.float()
 
+        actions = self._mask_padded_action_dims(actions)
+        noise = self._mask_padded_action_dims(noise)
+
         # `time` is the sampled scalar flow-matching time, shape (B,).
         # Below we derive `t` which is passed to embed_suffix as the timestep:
         #   - RTC:     t is (B, T), per-position time (delay positions get
@@ -808,6 +837,7 @@ class PI0FlowMatching(BaseVLA):
         if noise is None:
             actions_shape = (bsize, self.n_action_steps, self.max_action_dim)
             noise = self.sample_noise(actions_shape, device)
+        noise = self._mask_padded_action_dims(noise)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images=images,
@@ -839,6 +869,8 @@ class PI0FlowMatching(BaseVLA):
                 and prev_actions.shape[-1] < self.max_action_dim):
             pad_size = self.max_action_dim - prev_actions.shape[-1]
             prev_actions = F.pad(prev_actions, (0, pad_size), value=0.0)
+        if prev_actions is not None:
+            prev_actions = self._mask_padded_action_dims(prev_actions)
 
         rtc_method = None
         if prev_actions is not None and prefix_len > 0 and rtc_config:
@@ -873,6 +905,9 @@ class PI0FlowMatching(BaseVLA):
             x_t = self._predict_action_plain(
                 x_t=x_t, denoise=denoise, bsize=bsize, dt=dt, device=device)
 
+        x_t = self._mask_padded_action_dims(x_t)
+        if getattr(self, 'trim_action_prediction', False):
+            return x_t[..., :self.ori_action_dim]
         return x_t
 
     def denoise_step(
@@ -884,6 +919,7 @@ class PI0FlowMatching(BaseVLA):
         timestep,
     ):
         """Apply one denoising step of the noise `x_t` at a given timestep."""
+        x_t = self._mask_padded_action_dims(x_t)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
             self.embed_suffix(states, x_t, timestep))
         suffix_embs = self._cast_gemma_input(suffix_embs)
@@ -921,7 +957,7 @@ class PI0FlowMatching(BaseVLA):
         suffix_out = suffix_out[:, -action_time_dim:]
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self._project_action_output(suffix_out)
-        return v_t
+        return self._mask_padded_action_dims(v_t)
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         """
