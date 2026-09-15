@@ -1,48 +1,31 @@
 # Copyright 2026 Limx Dynamics
-"""Reproduce the 2026-09-09 basket PI0.5 RTC training recipe locally.
+"""Basket PI0.5 RTC training initialized from the official PI0.5 base.
 
-8 GPUs x batch 8 x accumulation 2 = 128; 8 epochs = 94,104 updates.
-With fewer GPUs, accumulation is increased to preserve global batch 128,
-but rank-local RNG/sample ordering is not bit-identical to the 8-GPU run.
+Fixed two-GPU recipe: 2 GPUs x batch 2 x accumulation 32 = global batch 128.
+For 8 GPUs, manually set runner.grad_accumulation_steps=8 with batch 2.
+Batch sizes, paths and schedule are explicit, like other PI05 configs; they
+do not change with environment variables. Edit batch and accumulation together.
+Keep 94,104 updates (8 epochs at global batch 128). Smaller microbatches and
+full-shard trade speed for memory; this is not the source 8-GPU throughput
+recipe, and rank-local RNG/sample ordering is not bit-identical to that run.
 
-Prepare the 64-D checkpoint with tools/expand_pi05_action_checkpoint.py,
-or set PI05_CHECKPOINT to the ORIGINAL expanded checkpoint for closer parity.
-The original expansion implementation/weights were not included in the logs;
-the local expansion is deterministic but is not claimed to be identical.
+Load the existing official 32-D checkpoint directly, without expanding it.
+Mapped parameters with matching shapes load normally. The 64-D action input
+weight, output weight and output bias retain their constructor initialization;
+the shape-compatible action input bias still loads from the checkpoint.
+This intentionally differs from the original run's expanded initialization.
 Use scripts/train.py so automatic action-window statistics are computed.
 Do not replace those statistics with episode-averaged quantiles.
 """
 
-import os
-
-DATA_ROOT = os.environ.get(
-    'BASKET_DATA_ROOT',
-    '/mnt/data/oss/raw_data/oli_basket_full_task_20260521_20260617')
+DATA_ROOT = '/mnt/data/oss/raw_data/oli_basket_full_task_20260521_20260617'
 DATA_DATES = ('0521', '0522', '0525', '0526', '0527', '0601', '0602', '0603',
               '0609', '0610', '0611', '0615', '0616', '0617')
 DATA_ROOTS = [
-    os.path.join(
-        DATA_ROOT,
-        f'{date}_basket_full_task_prompt_delta_base_filtered_lerobotv2.1')
+    f'{DATA_ROOT}/'
+    f'{date}_basket_full_task_prompt_delta_base_filtered_lerobotv2.1'
     for date in DATA_DATES
 ]
-PI05_CHECKPOINT = os.environ.get(
-    'PI05_CHECKPOINT',
-    './checkpoints/pi05_base_action64_basket/model.safetensors')
-PI05_TOKENIZER = os.environ.get('PI05_TOKENIZER', './checkpoints/pi05_base')
-
-# Use torchrun's world size rather than assuming this host has eight GPUs.
-WORLD_SIZE = int(os.environ.get('WORLD_SIZE', '8'))
-PER_DEVICE_BATCH_SIZE = 8
-GLOBAL_BATCH_SIZE = 128
-if WORLD_SIZE <= 0 or GLOBAL_BATCH_SIZE % (WORLD_SIZE * PER_DEVICE_BATCH_SIZE):
-    raise ValueError('WORLD_SIZE must divide 16 to preserve global batch 128.')
-GRAD_ACCUMULATION_STEPS = GLOBAL_BATCH_SIZE // (
-    WORLD_SIZE * PER_DEVICE_BATCH_SIZE)
-TOTAL_FRAMES = 1_505_539
-TARGET_EPOCHS = 8
-STEPS_PER_EPOCH = (TOTAL_FRAMES + GLOBAL_BATCH_SIZE - 1) // GLOBAL_BATCH_SIZE
-MAX_STEPS = TARGET_EPOCHS * STEPS_PER_EPOCH
 
 model = dict(
     type='PI05FlowMatching',
@@ -133,9 +116,10 @@ model = dict(
         vocab_size=257152),
     freeze_llm_backbone=False,
     freeze_vision_backbone=False,
-    pretrained_name_or_path=PI05_CHECKPOINT,
-    # Fail fast on a 32-D checkpoint instead of silently skipping projections.
-    strict_mapping=True,
+    pretrained_name_or_path='./checkpoints/pi05_base/model.safetensors',
+    # Shape mismatches retain the constructor's random initialization.
+    # Skip whole tensors; do not copy slices from the 32-D projections.
+    strict_mapping=False,
     name_mapping={
         'llm_backbone': 'paligemma_with_expert.paligemma.model.language_model',
         'vision_backbone.vision':
@@ -164,7 +148,7 @@ model = dict(
 inference_model = model.copy()
 
 train_dataloader = dict(
-    per_device_batch_size=PER_DEVICE_BATCH_SIZE,
+    per_device_batch_size=2,
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -216,7 +200,7 @@ train_dataloader = dict(
                     max_len=200,
                     tokenizer=dict(
                         type='PretrainedTokenizer',
-                        model_path=PI05_TOKENIZER)),
+                        model_path='./checkpoints/pi05_base')),
                 dict(type='PadStatesAndActions', model_action_dim=64),
                 dict(
                     type='ResizeImagesWithPad',
@@ -229,12 +213,14 @@ train_dataloader = dict(
 
 runner = dict(
     type='FSDPTrainRunner',
-    max_steps=MAX_STEPS,
+    max_steps=94104,
     max_epochs=None,
-    grad_accumulation_steps=GRAD_ACCUMULATION_STEPS,
+    # 2 samples/GPU x 2 GPUs x 32 microbatches = global batch 128.
+    # Set this to 8 on 8 GPUs when keeping per_device_batch_size=2.
+    grad_accumulation_steps=1,
     # Local runner equivalent of source save_steps=[11763, 23526, ..., 94104].
-    save_iter_interval=STEPS_PER_EPOCH,
-    max_keep_ckpts=TARGET_EPOCHS,
+    save_iter_interval=11763,
+    max_keep_ckpts=8,
     ema_decay=0.99,
     seed=42,
     optimizer=dict(
@@ -247,7 +233,9 @@ runner = dict(
         foreach=False,
         fused=True),
     max_grad_norm=1.0,
-    sharding_strategy='global-shard-grad-op',
+    # Config-only memory control: reshard parameters during accumulation,
+    # instead of retaining full weights with SHARD_GRAD_OP + no_sync.
+    sharding_strategy='full-shard',
     fsdp_wrap_policy='execution-block',
     reduce_in_full_precision=True,
     sampler=None,
@@ -255,9 +243,10 @@ runner = dict(
         type='linear-warmup+cosine-decay',
         schedule_style='openpi',
         warmup_steps=1000,
-        decay_steps=MAX_STEPS,
+        decay_steps=94104,
         min_lr=0.0),
-    tokenizer=dict(type='PretrainedTokenizer', model_path=PI05_TOKENIZER),
+    tokenizer=dict(
+        type='PretrainedTokenizer', model_path='./checkpoints/pi05_base'),
     collator=dict(
         type='DictCollator',
         keys=[
@@ -270,7 +259,9 @@ runner = dict(
         active_trackers=('jsonl', 'wandb'),
         run_dir='work_dirs',
         window_size=100),
-    enable_gradient_checkpointing=True,
+    # Match the existing ALOHA/Tron2 path; do not depend on changes to shared
+    # FSDP checkpoint boundaries. Use microbatch size and full-shard instead.
+    enable_gradient_checkpointing=False,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
     keep_params_fp32=True,
