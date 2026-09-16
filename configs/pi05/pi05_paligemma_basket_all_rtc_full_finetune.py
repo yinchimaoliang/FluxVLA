@@ -1,10 +1,13 @@
 # Copyright 2026 Limx Dynamics
 """Native 42-D basket PI0.5 RTC training using the main model implementation.
 
-Batch sizes, paths and schedule are explicit. Keep the current batch 2 and
-accumulation 1 unchanged to isolate the action-dimension/model-code change.
-On two GPUs this is global batch 4, not the original run's global batch 128;
-the fixed 94,104-update budget must not be described as eight epochs here.
+Fixed two-GPU recipe: 2 GPUs x batch 2 x accumulation 32 = global batch 128.
+For 8 / 16 GPUs, manually set runner.grad_accumulation_steps to 8 / 4.
+Batch sizes, paths and schedule are explicit, like other PI05 configs; they
+do not change with environment variables. Edit batch and accumulation together.
+Keep 94,104 updates (8 epochs at global batch 128). Smaller microbatches and
+full-shard trade speed for memory; this is not the source 8-GPU throughput
+recipe, and rank-local RNG/sample ordering is not bit-identical to that run.
 
 Load the existing official 32-D checkpoint directly, without expanding it.
 Mapped parameters with matching shapes load normally. The 42-D action input
@@ -143,7 +146,7 @@ model = dict(
 inference_model = model.copy()
 
 train_dataloader = dict(
-    per_device_batch_size=2,
+    per_device_batch_size=8,
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -210,7 +213,8 @@ runner = dict(
     type='FSDPTrainRunner',
     max_steps=94104,
     max_epochs=None,
-    # Preserve the current experiment: 2 samples/GPU x 2 GPUs x 1 = batch 4.
+    # 2 samples/GPU x 2 GPUs x 32 microbatches = global batch 128.
+    # For 8 / 16 GPUs with batch 2, manually set accumulation to 8 / 4.
     grad_accumulation_steps=1,
     # Local runner equivalent of source save_steps=[11763, 23526, ..., 94104].
     save_iter_interval=11763,
