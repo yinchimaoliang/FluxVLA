@@ -1,16 +1,13 @@
 # Copyright 2026 Limx Dynamics
-"""Basket PI0.5 RTC training initialized from the official PI0.5 base.
+"""Native 42-D basket PI0.5 RTC training using the main model implementation.
 
-Fixed two-GPU recipe: 2 GPUs x batch 2 x accumulation 32 = global batch 128.
-For 8 GPUs, manually set runner.grad_accumulation_steps=8 with batch 2.
-Batch sizes, paths and schedule are explicit, like other PI05 configs; they
-do not change with environment variables. Edit batch and accumulation together.
-Keep 94,104 updates (8 epochs at global batch 128). Smaller microbatches and
-full-shard trade speed for memory; this is not the source 8-GPU throughput
-recipe, and rank-local RNG/sample ordering is not bit-identical to that run.
+Batch sizes, paths and schedule are explicit. Keep the current batch 2 and
+accumulation 1 unchanged to isolate the action-dimension/model-code change.
+On two GPUs this is global batch 4, not the original run's global batch 128;
+the fixed 94,104-update budget must not be described as eight epochs here.
 
 Load the existing official 32-D checkpoint directly, without expanding it.
-Mapped parameters with matching shapes load normally. The 64-D action input
+Mapped parameters with matching shapes load normally. The 42-D action input
 weight, output weight and output bias retain their constructor initialization;
 the shape-compatible action input bias still loads from the checkpoint.
 This intentionally differs from the original run's expanded initialization.
@@ -75,19 +72,17 @@ model = dict(
     projector=dict(type='LinearProjector', in_dim=1152, out_dim=2048),
     proj_width=1024,
     n_action_steps=32,
-    action_in_proj=dict(type='LinearProjector', in_dim=64, out_dim=1024),
-    action_out_proj=dict(type='LinearProjector', in_dim=1024, out_dim=64),
+    action_in_proj=dict(type='LinearProjector', in_dim=42, out_dim=1024),
+    action_out_proj=dict(type='LinearProjector', in_dim=1024, out_dim=42),
     time_mlp_in=dict(type='LinearProjector', in_dim=1024, out_dim=1024),
     time_mlp_out=dict(type='LinearProjector', in_dim=1024, out_dim=1024),
     time_sampler='beta',
     time_beta_alpha=1.5,
     time_beta_beta=1.0,
     openpi_fp32_flow=True,
-    max_action_dim=64,
+    max_action_dim=42,
     ori_action_dim=42,
     loss_action_dim=42,
-    zero_padded_action_dims=True,
-    trim_action_prediction=True,
     llm_expert=dict(
         type='ConditionGemmaModel',
         attention_bias=False,
@@ -201,7 +196,7 @@ train_dataloader = dict(
                     tokenizer=dict(
                         type='PretrainedTokenizer',
                         model_path='./checkpoints/pi05_base')),
-                dict(type='PadStatesAndActions', model_action_dim=64),
+                dict(type='PadStatesAndActions', model_action_dim=42),
                 dict(
                     type='ResizeImagesWithPad',
                     height=224,
@@ -215,8 +210,7 @@ runner = dict(
     type='FSDPTrainRunner',
     max_steps=94104,
     max_epochs=None,
-    # 2 samples/GPU x 2 GPUs x 32 microbatches = global batch 128.
-    # Set this to 8 on 8 GPUs when keeping per_device_batch_size=2.
+    # Preserve the current experiment: 2 samples/GPU x 2 GPUs x 1 = batch 4.
     grad_accumulation_steps=1,
     # Local runner equivalent of source save_steps=[11763, 23526, ..., 94104].
     save_iter_interval=11763,
