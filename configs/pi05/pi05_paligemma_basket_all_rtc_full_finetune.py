@@ -2,7 +2,7 @@
 """Basket PI0.5 RTC training initialized from the official PI0.5 base.
 
 Fixed two-GPU recipe: 2 GPUs x batch 2 x accumulation 32 = global batch 128.
-For 8 GPUs, manually set runner.grad_accumulation_steps=8 with batch 2.
+For 8 / 16 GPUs, manually set runner.grad_accumulation_steps to 8 / 4.
 Batch sizes, paths and schedule are explicit, like other PI05 configs; they
 do not change with environment variables. Edit batch and accumulation together.
 Keep 94,104 updates (8 epochs at global batch 128). Smaller microbatches and
@@ -148,7 +148,7 @@ model = dict(
 inference_model = model.copy()
 
 train_dataloader = dict(
-    per_device_batch_size=2,
+    per_device_batch_size=8,
     per_device_num_workers=4,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -216,7 +216,7 @@ runner = dict(
     max_steps=94104,
     max_epochs=None,
     # 2 samples/GPU x 2 GPUs x 32 microbatches = global batch 128.
-    # Set this to 8 on 8 GPUs when keeping per_device_batch_size=2.
+    # For 8 / 16 GPUs with batch 2, manually set accumulation to 8 / 4.
     grad_accumulation_steps=1,
     # Local runner equivalent of source save_steps=[11763, 23526, ..., 94104].
     save_iter_interval=11763,

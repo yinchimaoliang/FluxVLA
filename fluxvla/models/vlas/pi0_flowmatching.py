@@ -632,7 +632,10 @@ class PI0FlowMatching(BaseVLA):
     def _prepare_attention_masks_4d(self, att_2d_masks):
         """Helper method to prepare 4D attention masks for transformer."""
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
-        mask = torch.zeros_like(att_2d_masks_4d, dtype=torch.bfloat16)
+        # SDPA accepts FP32 masks with either FP32 or BF16 queries. A BF16
+        # mask rejects FP32 queries, making a full-precision stability run
+        # impossible. Preserve the finite sentinel (including padded rows).
+        mask = torch.zeros_like(att_2d_masks_4d, dtype=torch.float32)
         mask.masked_fill_(~att_2d_masks_4d, torch.finfo(torch.bfloat16).min)
         return mask
 
