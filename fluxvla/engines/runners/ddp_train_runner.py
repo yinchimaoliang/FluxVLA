@@ -11,7 +11,8 @@ from typing import Dict, Optional
 
 import torch
 import wandb
-from peft import LoraConfig, PeftModel, get_peft_model
+from peft import (LoraConfig, PeftModel, cast_mixed_precision_params,
+                  get_peft_model)
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.pytorch_utils import Conv1D
 
@@ -94,6 +95,9 @@ class DDPTrainRunner(BaseTrainRunner):
         max_keep_ckpts (int): Maximum number of checkpoints to keep.
         device_id (int): ID of the device to run the training on.
             Defaults to 2.
+        keep_lora_trainable_params_fp32 (bool): Keep adapters and
+            ``modules_to_save`` in FP32 while frozen weights use BF16.
+            Opt-in to preserve existing LoRA recipes. Defaults to False.
     """
 
     def __init__(self,
@@ -125,6 +129,7 @@ class DDPTrainRunner(BaseTrainRunner):
                  resume_from: Optional[str] = None,
                  lora_before_device_move: bool = True,
                  static_graph: bool = True,
+                 keep_lora_trainable_params_fp32: bool = False,
                  **kwargs) -> None:
 
         if kwargs:
@@ -162,6 +167,8 @@ class DDPTrainRunner(BaseTrainRunner):
         self.args = args
         self.max_grad_norm = max_grad_norm
         self.lora_before_device_move = lora_before_device_move
+        self.keep_lora_trainable_params_fp32 = (
+            keep_lora_trainable_params_fp32)
         self.static_graph = static_graph
         self.distributed_state = overwatch.distributed_state
         self.recent_losses = deque(maxlen=self.grad_accumulation_steps)
@@ -188,11 +195,25 @@ class DDPTrainRunner(BaseTrainRunner):
     def _model_uses_lora(self) -> bool:
         return bool(getattr(self.cfg.model, 'use_lora', False))
 
-    def _move_vla_to_device(self, target_device: torch.device) -> None:
-        torch.cuda.empty_cache()
-        if (self.enable_mixed_precision_training
+    def _cast_lora_params_for_mixed_precision(self) -> bool:
+        if not (self.keep_lora_trainable_params_fp32 and isinstance(
+                self.vla, PeftModel) and self.enable_mixed_precision_training
                 and self.mixed_precision_dtype == torch.bfloat16
                 and not self.keep_params_fp32):
+            return False
+        # AdamW updates parameters directly and allocates moments in their
+        # dtype; autocast does not supply FP32 master weights. Do this before
+        # any device/dtype move so trained projectors never round through BF16.
+        cast_mixed_precision_params(self.vla, dtype=torch.bfloat16)
+        return True
+
+    def _move_vla_to_device(self, target_device: torch.device) -> None:
+        torch.cuda.empty_cache()
+        if self._cast_lora_params_for_mixed_precision():
+            self.vla = self.vla.to(device=target_device)
+        elif (self.enable_mixed_precision_training
+              and self.mixed_precision_dtype == torch.bfloat16
+              and not self.keep_params_fp32):
             self.vla = self.vla.to(device=target_device, dtype=torch.bfloat16)
         else:
             self.vla = self.vla.to(target_device)
@@ -213,6 +234,8 @@ class DDPTrainRunner(BaseTrainRunner):
             init_lora_weights='gaussian',
         )
         self.vla = get_peft_model(self.vla, lora_config)
+        # Also covers adapters injected after moving the frozen base.
+        self._cast_lora_params_for_mixed_precision()
         self.vla.print_trainable_parameters()
 
     def run_setup(self, n_train_examples: int) -> None:
@@ -332,7 +355,9 @@ class DDPTrainRunner(BaseTrainRunner):
                 f'|-> Deterministic Algorithms = {self.deterministic_algorithms}\n'  # noqa: E501
                 f'|-> DDP Static Graph = {self.static_graph}\n'
                 f'|-> Mixed Precision Training = {self.enable_mixed_precision_training}\n'  # noqa: E501
-                f'|-> Mixed Precision Dtype = {self.mixed_precision_dtype}\n')
+                f'|-> Mixed Precision Dtype = {self.mixed_precision_dtype}\n'
+                '|-> Keep LoRA Trainable Parameters FP32 = '
+                f'{self.keep_lora_trainable_params_fp32}\n')
 
     def clip_grad_norm(self):
         """Clip gradient norm for DDP model."""

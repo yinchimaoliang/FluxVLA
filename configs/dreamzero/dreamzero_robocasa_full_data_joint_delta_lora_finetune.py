@@ -521,6 +521,9 @@ runner = dict(
     enable_gradient_checkpointing=True,
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
+    # AdamW at 1e-5 needs FP32 adapters/projectors and optimizer moments.
+    # Frozen Wan/DiT parameters and autocast computation remain BF16.
+    keep_lora_trainable_params_fp32=True,
 )
 
 eval = dict(
