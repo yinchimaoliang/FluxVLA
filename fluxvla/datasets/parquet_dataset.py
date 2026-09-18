@@ -630,22 +630,26 @@ class PrivateInferenceDataset:
         inject_model_path (bool): Whether to add model_path to transform
             configs that do not define it. Disable this for pipelines whose
             transforms use explicit component paths. Defaults to True.
+        statistic_name (str): Key of ``norm_stats`` holding the statistics
+            the model was trained with (the training ``statistic_name``).
+            Defaults to 'private'.
     """
 
     def __init__(self,
                  norm_stats: str,
                  transforms: List[Dict],
                  model_path: str,
-                 statistic_name: str = 'private',
                  img_keys: List[str] = ['agentview_image'],
                  center_crop: bool = False,
                  resize_size: int = 224,
                  max_len: int = 180,
                  use_quantiles=True,
                  embodiment_id: int = None,
-                 inject_model_path: bool = True,
-                 extra_tensor_keys: Optional[List[str]] = None) -> None:
+                 extra_tensor_keys: Optional[List[str]] = None,
+                 statistic_name: str = 'private',
+                 inject_model_path: bool = True) -> None:
         from fluxvla.engines import build_transform_from_cfg
+        self.statistic_name = str(statistic_name)
         self.transforms = list()
         for transform in transforms:
             transform = dict(transform)
@@ -657,7 +661,6 @@ class PrivateInferenceDataset:
                 self.norm_stats = json.load(f)
         else:
             self.norm_stats = norm_stats
-        self.statistic_name = statistic_name
         self.img_keys = img_keys
         self.center_crop = center_crop
         self.resize_size = resize_size
