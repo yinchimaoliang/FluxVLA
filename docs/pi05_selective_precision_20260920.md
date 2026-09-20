@@ -1,5 +1,10 @@
 # PI05 basket：选择性 FP32 与完成的 FP32 对照
 
+后续反例：`9fa2cefebe` 的同 batch 256 长跑在约 11,000 步后仍然退化。
+因此本文的 AdaRMS 修复不足以保证稳定；下文保留当时的短程测量记录。
+新发现、attention 内核对照与进一步修正见
+[后续诊断](pi05_attention_instability_20260920.md)。
+
 本次在 `fix/lyh/fix-pi05-loss-explode`（HEAD `6dbfc8edb0ed`）的工作区验证。
 旧 commit 本身不包含工作区的 AdaRMS 修复。兼容性审查后，修复放入独立的
 `pi05_paligemma_basket_all_rtc_bf16_adarms_fp32_full_finetune.py`，明确启用

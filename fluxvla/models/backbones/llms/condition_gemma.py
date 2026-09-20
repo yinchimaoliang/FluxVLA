@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 from typing import Callable, Optional, Sequence, Type, Union
 
 import torch
@@ -42,6 +43,7 @@ except ImportError:
 from fluxvla.engines import LLM_BACKBONES
 from fluxvla.engines.utils.fsdp_wrapping import \
     build_transformer_layer_wrap_policy
+from fluxvla.engines.utils.model_utils import sdpa_math_fp32_attention_forward
 
 logger = logging.get_logger(__name__)
 
@@ -188,6 +190,7 @@ class GemmaMLP(nn.Module):
         self.down_proj = nn.Linear(
             self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
+        self.compute_fp32 = False
 
     def forward(self, x):
         """Forward pass for GemmaMLP.
@@ -202,8 +205,14 @@ class GemmaMLP(nn.Module):
                       `(batch_size, seq_length, hidden_size)`):
                 The output tensor of the MLP.
         """
-        down_proj = self.down_proj(
-            self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+        context = (
+            torch.autocast(device_type=x.device.type, enabled=False)
+            if self.compute_fp32 else contextlib.nullcontext())
+        with context:
+            if self.compute_fp32:
+                x = x.float()
+            down_proj = self.down_proj(
+                self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
 
@@ -442,6 +451,7 @@ class GemmaAttention(nn.Module):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
+        self.compute_fp32 = layer_idx in getattr(config, 'fp32_layers', ())
         self.head_dim = getattr(
             config, 'head_dim',
             config.hidden_size // config.num_attention_heads)
@@ -527,12 +537,19 @@ class GemmaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(
-            1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(
-            1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(
-            1, 2)
+        context = (
+            torch.autocast(
+                device_type=hidden_states.device.type, enabled=False)
+            if self.compute_fp32 else contextlib.nullcontext())
+        with context:
+            if self.compute_fp32:
+                hidden_states = hidden_states.float()
+            query_states = self.q_proj(hidden_states).view(
+                hidden_shape).transpose(1, 2)
+            key_states = self.k_proj(hidden_states).view(
+                hidden_shape).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(
+                hidden_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
         query_states, key_states = apply_rotary_pos_emb(
@@ -557,7 +574,14 @@ class GemmaAttention(nn.Module):
                                          dim=2)
 
         attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != 'eager':
+        if getattr(self.config, 'attention_math_fp32', False):
+            attention_interface = sdpa_math_fp32_attention_forward
+            # HF may omit an explicit causal mask for SDPA. Retain the
+            # causality that its SDPA adapter would infer in that case.
+            kwargs.setdefault(
+                'is_causal', attention_mask is None
+                and query_states.shape[-2] > 1)
+        elif self.config._attn_implementation != 'eager':
             attention_interface = ALL_ATTENTION_FUNCTIONS[
                 self.config._attn_implementation]
 
@@ -573,7 +597,13 @@ class GemmaAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        context = (
+            torch.autocast(device_type=attn_output.device.type, enabled=False)
+            if self.compute_fp32 else contextlib.nullcontext())
+        with context:
+            if self.compute_fp32:
+                attn_output = attn_output.float()
+            attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
 
@@ -593,6 +623,7 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         self.self_attn = GemmaAttention(config=config, layer_idx=layer_idx)
 
         self.mlp = GemmaMLP(config)
+        self.mlp.compute_fp32 = self.self_attn.compute_fp32
         cond_dim = getattr(config, 'adarms_cond_dim', None) if getattr(
             config, 'use_adarms', False) else None
         self.input_layernorm = GemmaRMSNorm(
@@ -799,6 +830,11 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
             Whether to use cache for faster inference.
         vocab_size (`int`, *optional*, defaults to `257152`):
             The size of the vocabulary.
+        attention_math_fp32 (`bool`, *optional*, defaults to `False`):
+            Use FP32 math attention, including its backward pass.
+        fp32_layers (`Sequence[int]`, *optional*):
+            Layers whose attention projections and FFNs compute in FP32.
+            Requires FP32 parameters; other layers retain autocast behavior.
     """
 
     def __init__(self,
@@ -826,7 +862,16 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
                  use_adarms: bool = True,
                  use_cache: bool = True,
                  vocab_size: int = 257152,
-                 adarms_fp32: bool = False):
+                 adarms_fp32: bool = False,
+                 attention_math_fp32: bool = False,
+                 fp32_layers: Optional[Sequence[int]] = None):
+        # These switches affect computation, not checkpoint parameter layout.
+        # Protected layers require FP32 master parameters under autocast.
+        fp32_layers = tuple(fp32_layers or ())
+        if any(
+                type(index) is not int or not 0 <= index < num_hidden_layers
+                for index in fp32_layers):
+            raise ValueError('fp32_layers must contain valid layer indices.')
         config = GemmaConfig(
             attention_bias=attention_bias,
             adarms_cond_dim=adarms_cond_dim,
@@ -852,7 +897,9 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
             use_adarms=use_adarms,
             use_cache=use_cache,
             vocab_size=vocab_size,
-            adarms_fp32=adarms_fp32)
+            adarms_fp32=adarms_fp32,
+            attention_math_fp32=attention_math_fp32,
+            fp32_layers=fp32_layers)
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size

@@ -26,12 +26,10 @@ from fluxvla.engines import (VLAS, build_llm_backbone_from_cfg,
                              build_projector_from_cfg)
 from fluxvla.engines.losses import reduce_action_bc_loss
 from fluxvla.engines.utils.fsdp_wrapping import build_combined_wrap_policy
-from fluxvla.engines.utils.model_utils import (apply_rotary_pos_emb,
-                                               create_sinusoidal_pos_embedding,
-                                               eager_attention_forward,
-                                               gated_residual,
-                                               make_att_2d_masks, sample_beta,
-                                               sdpa_attention_forward)
+from fluxvla.engines.utils.model_utils import (
+    apply_rotary_pos_emb, create_sinusoidal_pos_embedding,
+    eager_attention_forward, gated_residual, make_att_2d_masks, sample_beta,
+    sdpa_attention_forward, sdpa_math_fp32_attention_forward)
 from fluxvla.engines.utils.overwatch import initialize_overwatch
 from .base_vla import BaseVLA
 
@@ -274,6 +272,17 @@ class PI0FlowMatching(BaseVLA):
                 target[..., :self.loss_action_dim])
 
     def get_attention_interface(self):
+        math_fp32 = [
+            getattr(
+                getattr(model, 'config', None), 'attention_math_fp32', False)
+            for model in (self.llm_backbone, self.llm_expert)
+        ]
+        if any(math_fp32):
+            if not all(math_fp32):
+                raise ValueError(
+                    'Joint attention requires attention_math_fp32 '
+                    'on both the backbone and expert.')
+            return sdpa_math_fp32_attention_forward
         if self.attention_implementation == 'sdpa':
             attention_interface = sdpa_attention_forward
         elif self.attention_implementation == 'eager':
@@ -447,12 +456,19 @@ class PI0FlowMatching(BaseVLA):
                 hidden_shape = (*hidden_states.shape[:-1], -1,
                                 layer.self_attn.head_dim)
 
-                query_state = layer.self_attn.q_proj(hidden_states).view(
-                    hidden_shape).transpose(1, 2)
-                key_state = layer.self_attn.k_proj(hidden_states).view(
-                    hidden_shape).transpose(1, 2)
-                value_state = layer.self_attn.v_proj(hidden_states).view(
-                    hidden_shape).transpose(1, 2)
+                compute_fp32 = getattr(layer.self_attn, 'compute_fp32', False)
+                context = (
+                    self._disable_autocast(hidden_states)
+                    if compute_fp32 else contextlib.nullcontext())
+                with context:
+                    if compute_fp32:
+                        hidden_states = hidden_states.float()
+                    query_state = layer.self_attn.q_proj(hidden_states).view(
+                        hidden_shape).transpose(1, 2)
+                    key_state = layer.self_attn.k_proj(hidden_states).view(
+                        hidden_shape).transpose(1, 2)
+                    value_state = layer.self_attn.v_proj(hidden_states).view(
+                        hidden_shape).transpose(1, 2)
 
                 query_states.append(query_state)
                 key_states.append(key_state)
@@ -501,8 +517,13 @@ class PI0FlowMatching(BaseVLA):
                 if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                     att_output = att_output.to(
                         layer.self_attn.o_proj.weight.dtype)
-                out_emb = layer.self_attn.o_proj(att_output[:,
-                                                            start_pos:end_pos])
+                compute_fp32 = getattr(layer.self_attn, 'compute_fp32', False)
+                context = (
+                    self._disable_autocast(att_output)
+                    if compute_fp32 else contextlib.nullcontext())
+                with context:
+                    out_emb = layer.self_attn.o_proj(
+                        att_output[:, start_pos:end_pos])
 
                 out_emb = gated_residual(hidden_states, out_emb, gates[i])
                 after_first_residual = out_emb.clone()
