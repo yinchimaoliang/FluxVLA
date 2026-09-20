@@ -21,9 +21,12 @@
 #   - AdamW(2.5e-5, betas=(0.9, 0.95), eps=1e-8, wd=1e-10 on all params),
 #     linear warmup (3%) -> cosine decay to 2.5e-6, grad clip 1.0
 #   - EMA 0.99 (checkpoints store EMA weights for evaluation), seed 42
-#   - batch/duration follow the in-house RoboTwin convention instead of the
-#     official recipe: global batch = 8 x GPU count and 5 training epochs
-#     (official: global batch 64, 20k steps, warmup 1000, decay 30000)
+#   - clean/randomized sources are sampled 1:1, independently of their sizes
+#   - global batch = 8 x GPU count x gradient accumulation; train for three
+#     balanced epochs (each epoch has 2 * max(source frame counts) samples)
+# This is a mixed-data training recipe, not a reproduction of the published
+# StarVLA score. Do not cap it at the old 10k steps: that run saw only 0.42
+# passes over its 6.08M source frames at global batch 256.
 # Unlike configs/pi05/pi05_paligemma_aloha_full_finetune.py there is no
 # JointSignTransform / gripper coordinate conversion: the official RoboTwin
 # configs pass adapt_to_pi=False, which leaves state/actions untouched.
@@ -156,7 +159,8 @@ train_dataloader = dict(
     per_device_batch_size=8,
     per_device_num_workers=4,
     dataset=dict(
-        type='DistributedRepeatingDataset',
+        type='DistributedBalancedRepeatingDataset',
+        sampling_weights=[1.0, 1.0],
         seed=42,
         reshuffle_each_epoch=True,
         # Keep state and action statistics separate: action statistics are
@@ -175,78 +179,82 @@ train_dataloader = dict(
             profile='absolute',
             delta_mask=_ALOHA_DELTA_MASK,
         ),
-        datasets=[
-            dict(
-                type='ParquetDataset',
-                data_root_path=[
-                    'datasets/robotwin_clean_lerobotv2.1',
-                    'datasets/robotwin_randomized_lerobotv2.1',
-                ],
-                # Official RoboTwin repacks {"actions": "action"}: use the
-                # recorded action column, with the chunk starting at the
-                # current frame (OpenPI delta_timestamps convention).
-                action_key='action',
-                action_window_size=50,
-                window_start_idx=0,
-                # OpenPI/LeRobot supervises repeated terminal hold actions.
-                supervise_terminal_padding=True,
-                transforms=[
-                    dict(
-                        type='ProcessParquetInputs',
-                        parquet_keys=[
-                            'observation.state', 'timestamp', 'actions',
-                            'info', 'stats', 'action_masks'
-                        ],
-                        video_keys=[
-                            'observation.images.cam_high',
-                            'observation.images.cam_left_wrist',
-                            'observation.images.cam_right_wrist'
-                        ],
-                        name_mappings={
-                            'observation.state': ['states'],
-                            'actions': ['actions']
-                        },
-                        # Pin the decoder so an optional torchcodec install
-                        # cannot silently change training inputs.
-                        video_backend='pyav'),
-                    dict(type='RelativeActions', mask=_ALOHA_DELTA_MASK),
-                    # Normalize at native dimension; padding happens after
-                    # prompt tokenization, matching OpenPI.
-                    dict(
-                        type='NormalizeStatesAndActions',
-                        action_dim=None,
-                        state_dim=None,
-                        state_key='proprio',
-                        action_key='action',
-                        norm_type='quantile',
-                        output_dtype='float32'),
-                    dict(type='PreparePromptWithState'),
-                    dict(
-                        type='ProcessPrompts',
-                        max_len=200,
-                        tokenizer=dict(
-                            type='PretrainedTokenizer',
-                            model_path=  # noqa: E251
-                            'checkpoints/pi05_base',  # noqa: E501
-                        )),
-                    dict(type='PadStatesAndActions', model_action_dim=32),
-                    dict(
-                        type='ResizeImagesWithPad',
-                        height=224,
-                        width=224,
-                        backend='pil'),
-                    dict(type='SimpleNormalizeImages'),
-                    dict(type='OpenPIImageAugment', base_camera_indices=(0, )),
-                ])
-        ]))
+        # A single multi-root dataset lets the balanced wrapper see each
+        # root as a source. Wrapping it in a one-element list would instead
+        # expose only ONE source and would not balance clean vs randomized.
+        datasets=dict(
+            type='ParquetDataset',
+            data_root_path=[
+                'datasets/robotwin_clean_lerobotv2.1',
+                'datasets/robotwin_randomized_lerobotv2.1',
+            ],
+            # Official RoboTwin repacks {"actions": "action"}: use the
+            # recorded action column, with the chunk starting at the
+            # current frame (OpenPI delta_timestamps convention).
+            action_key='action',
+            action_window_size=50,
+            window_start_idx=0,
+            # OpenPI/LeRobot supervises repeated terminal hold actions.
+            supervise_terminal_padding=True,
+            transforms=[
+                dict(
+                    type='ProcessParquetInputs',
+                    parquet_keys=[
+                        'observation.state', 'timestamp', 'actions', 'info',
+                        'stats', 'action_masks'
+                    ],
+                    video_keys=[
+                        'observation.images.cam_high',
+                        'observation.images.cam_left_wrist',
+                        'observation.images.cam_right_wrist'
+                    ],
+                    name_mappings={
+                        'observation.state': ['states'],
+                        'actions': ['actions']
+                    },
+                    # Pin the decoder so an optional torchcodec install
+                    # cannot silently change training inputs.
+                    video_backend='pyav'),
+                dict(type='RelativeActions', mask=_ALOHA_DELTA_MASK),
+                # Normalize at native dimension; padding happens after
+                # prompt tokenization, matching OpenPI.
+                dict(
+                    type='NormalizeStatesAndActions',
+                    action_dim=None,
+                    state_dim=None,
+                    state_key='proprio',
+                    action_key='action',
+                    norm_type='quantile',
+                    output_dtype='float32'),
+                dict(type='PreparePromptWithState'),
+                dict(
+                    type='ProcessPrompts',
+                    max_len=200,
+                    tokenizer=dict(
+                        type='PretrainedTokenizer',
+                        model_path=  # noqa: E251
+                        'checkpoints/pi05_base',  # noqa: E501
+                    )),
+                dict(type='PadStatesAndActions', model_action_dim=32),
+                dict(
+                    type='ResizeImagesWithPad',
+                    height=224,
+                    width=224,
+                    backend='pil'),
+                dict(type='SimpleNormalizeImages'),
+                dict(type='OpenPIImageAugment', base_camera_indices=(0, )),
+            ])))
 
 runner = dict(
     type='FSDPTrainRunner',
-    # In-house RoboTwin convention: global batch = 8 x GPU count (e.g. 16
-    # GPUs -> 128) and epoch-based duration. The official OpenPI recipe is
-    # global batch 64 / max_steps=20_000 (warmup_steps=1000,
-    # decay_steps=30000) with grad accumulation sized to hold batch 64.
+    # Epoch length follows the balanced sampler, not raw concatenation.
+    # At a 1:10 source-size ratio, three epochs provide ~3 randomized passes
+    # and ~30 clean passes. Check clean AND random evaluation for overfitting.
+    # max_steps=None selects the runner's epoch_based training loop.
+    max_steps=None,
     max_epochs=3,
+    save_epoch_interval=1,
+    max_keep_ckpts=3,
     ema_decay=0.99,
     seed=42,
     optimizer=dict(
