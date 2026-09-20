@@ -409,10 +409,10 @@ def compute_statistics(dataset_paths: Sequence[Path],
         raise ValueError(f'{profile_name!r} profile expects '
                          f'{requested.expected_dim}D state/action values, got '
                          f'{state_dim}D/{action_dim}D.')
-    if state_dim != action_dim and delta_mask:
+    if delta_mask and len(delta_mask) > min(state_dim, action_dim):
         raise ValueError(
-            'Delta conversion requires compatible state/action dimensions; '
-            f'got {state_dim} and {action_dim}.')
+            f'Delta mask length {len(delta_mask)} exceeds state/action '
+            f'dimensions {state_dim}/{action_dim}.')
 
     total_states = 0
     total_actions = 0

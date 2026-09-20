@@ -79,6 +79,8 @@ class PI0FlowMatching(BaseVLA):
         openpi_fp32_flow (bool): Keep noise, actions, timestep projections,
             and the velocity head in FP32, matching OpenPI JAX. Gemma inputs
             are cast to BF16 at the model boundary.
+        preserve_fp32_residuals (bool): Keep Gemma inputs in FP32 when its
+            parameters are FP32. Defaults to False for legacy recipe parity.
         **kwargs: Additional keyword arguments for model configuration.
     """
 
@@ -122,6 +124,7 @@ class PI0FlowMatching(BaseVLA):
                  time_beta_beta: float = 1.0,
                  openpi_fp32_flow: bool = False,
                  rtc_training_config: Optional[Dict] = None,
+                 preserve_fp32_residuals: bool = False,
                  **kwargs):
         super(PI0FlowMatching, self).__init__(
             vision_backbone=vision_backbone,
@@ -199,6 +202,7 @@ class PI0FlowMatching(BaseVLA):
         self.time_beta_alpha = float(time_beta_alpha)
         self.time_beta_beta = float(time_beta_beta)
         self.openpi_fp32_flow = bool(openpi_fp32_flow)
+        self.preserve_fp32_residuals = bool(preserve_fp32_residuals)
         self.rtc_training_config = rtc_training_config
 
     @staticmethod
@@ -212,7 +216,15 @@ class PI0FlowMatching(BaseVLA):
         if tensor is None:
             return None
         if self.openpi_fp32_flow and self.enable_mixed_precision_training:
-            return tensor.to(torch.bfloat16)
+            if not self.preserve_fp32_residuals:
+                return tensor.to(torch.bfloat16)
+            # Keep the residual stream in FP32 with FP32 master parameters.
+            # Autocast still controls matrix kernels. Match the cast used by
+            # LeRobot when the Gemma parameters themselves are BF16.
+            weight_dtype = (
+                self.llm_backbone.layers[0].self_attn.q_proj.weight.dtype)
+            if weight_dtype == torch.bfloat16:
+                return tensor.to(torch.bfloat16)
         return tensor
 
     def _project_action_output(self, suffix_out: torch.Tensor):

@@ -54,16 +54,20 @@ class GemmaRMSNorm(nn.Module):
         dim (int): The dimension of the input.
         eps (float): The epsilon value for numerical stability.
         cond_dim (Optional[int]): The dimension of the condition.
+        adarms_fp32 (bool): Compute conditional scale, shift and gate in FP32
+            even inside autocast. Defaults to False.
     """
 
     def __init__(self,
                  dim: int,
                  eps: float = 1e-6,
-                 cond_dim: Optional[int] = None):
+                 cond_dim: Optional[int] = None,
+                 adarms_fp32: bool = False):
         super().__init__()
         self.eps = eps
         self.dim = dim
         self.cond_dim = cond_dim
+        self.adarms_fp32 = adarms_fp32
 
         # Dense layer for adaptive normalization (if cond_dim is provided)
         if cond_dim is not None:
@@ -125,8 +129,15 @@ class GemmaRMSNorm(nn.Module):
                 f'Expected cond dimension {self.cond_dim}, got {cond.shape[-1]}'  # noqa: E501
             )
 
-        # self.dense.to(dtype=torch.bfloat16).to(dtype=torch.float32)
-        modulation = self.dense(cond)
+        if self.adarms_fp32:
+            # Quantizing this projection can strongly perturb gradients of
+            # the timestep MLP even when the forward loss barely changes.
+            with torch.autocast(device_type=cond.device.type, enabled=False):
+                modulation = nn.functional.linear(cond.float(),
+                                                  self.dense.weight.float(),
+                                                  self.dense.bias.float())
+        else:
+            modulation = self.dense(cond)
         # [batch, 1, features] for scalar cond;
         # per-position [batch, seq, features] needs no reshape.
         if modulation.dim() == 2 and len(x.shape) == 3:
@@ -585,9 +596,15 @@ class GemmaDecoderLayer(GradientCheckpointingLayer):
         cond_dim = getattr(config, 'adarms_cond_dim', None) if getattr(
             config, 'use_adarms', False) else None
         self.input_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, cond_dim=cond_dim)
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            cond_dim=cond_dim,
+            adarms_fp32=getattr(config, 'adarms_fp32', False))
         self.post_attention_layernorm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, cond_dim=cond_dim)
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            cond_dim=cond_dim,
+            adarms_fp32=getattr(config, 'adarms_fp32', False))
 
     def forward(
         self,
@@ -734,6 +751,8 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
             Whether to use attention bias.
         adarms_cond_dim (`int`, *optional*, defaults to `1024`):
             The dimension of the condition for ADARMS.
+        adarms_fp32 (`bool`, *optional*, defaults to `False`):
+            Compute conditional scale, shift and gate projections in FP32.
         attention_dropout (`float`, *optional*, defaults to `0.0`):
             The dropout probability for the attention layers.
         bos_token_id (`int`, *optional*, defaults to `2`):
@@ -806,7 +825,8 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
                  transformers_version: str = '4.48.1',
                  use_adarms: bool = True,
                  use_cache: bool = True,
-                 vocab_size: int = 257152):
+                 vocab_size: int = 257152,
+                 adarms_fp32: bool = False):
         config = GemmaConfig(
             attention_bias=attention_bias,
             adarms_cond_dim=adarms_cond_dim,
@@ -831,7 +851,8 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
             transformers_version=transformers_version,
             use_adarms=use_adarms,
             use_cache=use_cache,
-            vocab_size=vocab_size)
+            vocab_size=vocab_size,
+            adarms_fp32=adarms_fp32)
         super().__init__(config)
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -846,7 +867,10 @@ class ConditionGemmaModel(GemmaPreTrainedModel):
         cond_dim = getattr(config, 'adarms_cond_dim', None) if getattr(
             config, 'use_adarms', False) else None
         self.norm = GemmaRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, cond_dim=cond_dim)
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            cond_dim=cond_dim,
+            adarms_fp32=adarms_fp32)
         self.rotary_emb = GemmaRotaryEmbedding(config=config)
         self.gradient_checkpointing = False
 
