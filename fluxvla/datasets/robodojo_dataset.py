@@ -39,15 +39,21 @@ class RoboDojoEvalDataset:
         unnorm_key (str): Key inside ``norm_stats`` for this benchmark.
         transforms (List[Dict] | None): Transform config list applied in
             order (e.g. ProcessEvalInputs, StateFromInputs, prompt, image).
+        state_dtype (str): State tensor precision, ``bf16`` or ``fp32``.
     """
 
     def __init__(self,
                  norm_stats: Any = None,
                  unnorm_key: str = 'robodojo_arx_x5',
                  transforms: List[Dict] = None,
+                 state_dtype: str = 'bf16',
                  **kwargs) -> None:
         from fluxvla.engines import build_transform_from_cfg
 
+        if state_dtype not in ('bf16', 'fp32'):
+            raise ValueError('state_dtype must be "bf16" or "fp32"')
+        self.state_dtype = (
+            torch.float32 if state_dtype == 'fp32' else torch.bfloat16)
         self.transforms = [
             build_transform_from_cfg(t) for t in (transforms or [])
         ]
@@ -61,6 +67,7 @@ class RoboDojoEvalDataset:
     def __call__(self, inputs: Dict[str, Any]) -> tuple:
         """Convert one observation into ``(batch, None)`` (no replay)."""
         data = dict(inputs)
+        is_new_episode = bool(data.get('is_new_episode', False))
 
         # Inject statistics for StateFromInputs.
         if self.norm_stats is not None and self.unnorm_key in self.norm_stats:
@@ -82,7 +89,10 @@ class RoboDojoEvalDataset:
             raise TypeError(
                 'pixel_values must be a torch tensor (TransformImage output), '
                 f'got {type(pixel_values)}')
-        num_imgs = pixel_values.shape[0] // 3
+        image_grid_thw = data.get('image_grid_thw')
+        num_imgs = (
+            len(image_grid_thw)
+            if image_grid_thw is not None else pixel_values.shape[0] // 3)
         img_masks = data.get('img_masks', [True] * num_imgs)
         img_masks = list(img_masks)
 
@@ -92,11 +102,14 @@ class RoboDojoEvalDataset:
             lang_tokens=tokens.unsqueeze(0).cuda(),
             lang_masks=torch.tensor(token_mask).unsqueeze(0).cuda(),
         )
+        if image_grid_thw is not None:
+            batch['image_grid_thw'] = torch.as_tensor(
+                image_grid_thw, dtype=torch.long).cuda().unsqueeze(0)
         if 'states' in data:
-            batch['states'] = torch.from_numpy(
-                data['states']).bfloat16().cuda().unsqueeze(0)
+            batch['states'] = torch.as_tensor(
+                data['states'], dtype=self.state_dtype).cuda().unsqueeze(0)
         if 'embodiment_ids' in data:
             batch['embodiment_ids'] = torch.from_numpy(
                 np.asarray(data['embodiment_ids'])).int().cuda().unsqueeze(0)
-        batch['reset_history'] = bool(data.get('is_new_episode', False))
+        batch['reset_history'] = is_new_episode
         return batch, None

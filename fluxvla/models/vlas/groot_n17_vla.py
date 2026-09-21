@@ -51,6 +51,10 @@ class GrootN17VLA(BaseVLA):
     while we port N1.7 layer by layer. Runtime assembly, forward, and
     prediction stay model-owned because N1.7 needs image-token masks that are
     not part of the generic continuous-action VLA contract.
+
+    ``model_path`` accepts an official GR00T directory or a complete native
+    FluxVLA ``.safetensors`` file. Native files use the inline/default model
+    architecture; they do not require the original checkpoint metadata.
     """
 
     # Architecture-only defaults for the public GR00T N1.7 3B checkpoint.
@@ -118,6 +122,9 @@ class GrootN17VLA(BaseVLA):
         name_mapping: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> None:
+        if kwargs.pop('pretrained_name_or_path', None) is not None:
+            raise TypeError('GrootN17VLA uses model_path for both official '
+                            'directories and native .safetensors files.')
         native_vlm_backbone_cfg = copy.deepcopy(vlm_backbone)
         native_vla_head_cfg = copy.deepcopy(vla_head)
         if name_mapping is None:
@@ -137,6 +144,11 @@ class GrootN17VLA(BaseVLA):
             name_mapping=name_mapping,
         )
         self.model_path = model_path
+        path = Path(
+            model_path).expanduser() if model_path is not None else None
+        self._native_checkpoint_path = (
+            path if path is not None and path.suffix == '.safetensors'
+            and not path.is_dir() else None)
         self.inline_model_config = copy.deepcopy(model_config or {})
         self.processor_path = processor_path
         self.inline_processor_kwargs = copy.deepcopy(processor_kwargs)
@@ -202,7 +214,8 @@ class GrootN17VLA(BaseVLA):
         # Placeholder so generic module utilities have a device anchor before
         # Layer 2 instantiates the real N1.7 modules.
         self._device_anchor = nn.Parameter(torch.empty(0), requires_grad=False)
-        if self.model_path is not None and self.load_metadata:
+        if (self.model_path is not None and self.load_metadata
+                and self._native_checkpoint_path is None):
             self._load_checkpoint_metadata(Path(self.model_path))
 
         overwatch.info('Initialized GrootN17VLA shell: '
@@ -478,12 +491,20 @@ class GrootN17VLA(BaseVLA):
                 'checkpoint_dir': str(self.checkpoint_dir),
                 'all_module_keys': list(self.all_module_keys or []),
             }
-        if self.load_pretrained_weights and self.checkpoint_dir is None:
-            raise ValueError('Native runtime requires model_path metadata.')
+        native_checkpoint = self._native_checkpoint_path
+        if self.load_pretrained_weights:
+            if native_checkpoint is not None:
+                if not native_checkpoint.is_file():
+                    raise FileNotFoundError(
+                        f'N1.7 checkpoint not found: {native_checkpoint}')
+            elif self.checkpoint_dir is None:
+                raise ValueError(
+                    'Native runtime requires model_path metadata.')
         self._apply_qwen3_runtime(patch_gr00t_backbone=False)
 
         config = self._native_n17_config()
-        build_device = 'cpu' if self.load_pretrained_weights else 'meta'
+        build_device = ('cpu' if self.load_pretrained_weights
+                        and native_checkpoint is None else 'meta')
         with torch.device(build_device):
             backbone = build_vlm_backbone_from_cfg(
                 copy.deepcopy(self._native_vlm_backbone_cfg),
@@ -509,6 +530,20 @@ class GrootN17VLA(BaseVLA):
                 'all_module_keys': list(self.all_module_keys),
                 'qwen3_runtime': self.qwen3_runtime,
                 'qwen3_runtime_summary': self.qwen3_runtime_summary,
+            }
+
+        if native_checkpoint is not None:
+            safetensors_torch = importlib.import_module('safetensors.torch')
+            state_dict = safetensors_torch.load_file(
+                str(native_checkpoint), device='cpu')
+            # Modules already exist, so load_state_dict's runtime check is
+            # idempotent. Its meta assignment/finalization path stays shared
+            # with evaluation loading. No optimizer or step state is restored.
+            self.load_state_dict(state_dict, strict=True)
+            return {
+                'status': 'ok',
+                'checkpoint_path': str(native_checkpoint),
+                'all_module_keys': list(self.all_module_keys),
             }
 
         backbone_state_dict = self._load_prefixed_state_dict(
@@ -663,8 +698,8 @@ class GrootN17VLA(BaseVLA):
     def from_pretrained(self):
         """Runner-facing loader hook.
 
-        Native module construction adapts the official sharded source weights;
-        runner checkpoints are handled separately by ``load_state_dict``.
+        Initialize from model_path through the model-owned runtime loader;
+        optimizer/step resume remains the responsibility of the runner.
         """
         self._ensure_native_runtime()
         # DDP invokes this hook after its initial freeze pass, when the lazy
@@ -833,6 +868,21 @@ class GrootN17VLA(BaseVLA):
             image_mask=backbone_output.auxiliary_outputs.get('image_mask'),
             seed=seed,
         )
+        # The head samples its padded training horizon (normally 40), while
+        # the embodiment can supervise fewer steps. Mirror N1.7's processor
+        # decode before applying horizon-dependent action statistics.
+        modalities = self.processor_config.get('processor_kwargs',
+                                               {}).get('modality_configs', {})
+        action_config = modalities.get(self.active_embodiment_key,
+                                       {}).get('action', {})
+        indices = action_config.get('delta_indices')
+        if indices is not None:
+            horizon = len(indices)
+            if not 0 < horizon <= actions.shape[1]:
+                raise ValueError(
+                    f'Configured action window {horizon} is incompatible '
+                    f'with predicted horizon {actions.shape[1]}.')
+            actions = actions[:, :horizon]
         return actions.float()
 
     def forward(self, *args, **kwargs):
