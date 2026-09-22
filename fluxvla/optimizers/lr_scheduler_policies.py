@@ -334,6 +334,11 @@ class LinearWarmupCosineDecayMinLRScheduler(BaseLRSchedulerPolicy):
         base_lr = float(runner.optimizer_cfg['lr'])
         groups = self.build_param_groups(runner, weight_decay)
         kwargs = {'betas': self.betas}
+        # This policy bypasses the generic optimizer builder. Do not silently
+        # drop backend settings that control AdamW's temporary memory usage.
+        for key in ('fused', 'foreach'):
+            if key in runner.optimizer_cfg:
+                kwargs[key] = runner.optimizer_cfg[key]
         if (str(self.weight_decay_style).replace('-', '_') == 'uniform'
                 and weight_decay is not None):
             kwargs['weight_decay'] = weight_decay

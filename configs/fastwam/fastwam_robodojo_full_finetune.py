@@ -165,8 +165,9 @@ model = dict(
 inference_model = model.copy()
 
 train_dataloader = dict(
-    # Global batch: 8 samples/GPU x 8 GPUs x 2 accumulation = 128.
-    per_device_batch_size=8,
+    # Global batch: 2 samples/GPU x total GPUs; no gradient accumulation.
+    # On 8 GPUs this is batch 16, not the former batch 32 (2 x 8 x 2).
+    per_device_batch_size=2,
     per_device_num_workers=8,
     dataset=dict(
         _delete_=True,
@@ -255,13 +256,20 @@ train_dataloader = dict(
     ),
 )
 
-# Keep the FastWAM optimizer, FSDP policy, and training-eval diagnostics.
+# Shard along the submodules actually invoked by MoT, not the entire 6B head.
+# One micro-step per update avoids no_sync's unsharded gradient retention
+# using the existing runner, without changing its synchronization behavior.
+# MoT's per-expert/mixed-attention checkpointing is already enabled in model;
+# the generic runner enable_gradient_checkpointing flag does not control it.
 runner = dict(
     max_epochs=None,
     max_steps=130000,
-    grad_accumulation_steps=2,
+    grad_accumulation_steps=1,
+    sharding_strategy='full-shard',
+    fsdp_wrap_policy='execution-block',
+    optimizer=dict(fused=True),
     max_keep_ckpts=5,
-    metric=dict(grad_accumulation_steps=2),
+    metric=dict(grad_accumulation_steps=1),
 )
 
 eval = dict(

@@ -738,6 +738,48 @@ class FastWAMVLA(BaseVLA):
     # ------------------------------------------------------------------
     # BaseVLA abstract method implementations
     # ------------------------------------------------------------------
+    def get_fsdp_ignored_modules(self) -> List[torch.nn.Module]:
+        """Keep frozen VAE/T5 replicas in their checkpoint dtype.
+
+        Their forwards are no-grad. Flattening them into the root FSDP unit
+        creates FP32 master shards and repeatedly gathers an unused frozen
+        parameter group alongside the trainable experts.
+        """
+        if not any(p.requires_grad for p in self.vlm_backbone.parameters()):
+            return [self.vlm_backbone]
+        return []
+
+    def get_fsdp_execution_block_wrapping_policy(self) -> Callable:
+        """Shard only modules whose forward is actually called by MoT.
+
+        MoT reads DiTBlock modulation and self-attention projections directly,
+        so wrapping an expert or DiTBlock itself is unsafe. Its projection,
+        cross-attention, and FFN calls are valid FSDP boundaries, and keep a
+        whole multi-billion-parameter head from being gathered at once. The
+        original module hierarchy/checkpoint keys are unchanged.
+        """
+        units = set()
+        for expert in self.vla_head.mot.mixtures.values():
+            for name in ('patch_embedding', 'action_encoder', 'text_embedding',
+                         'time_embedding', 'time_projection',
+                         'action_embedding', 'head'):
+                module = getattr(expert, name, None)
+                if isinstance(module, torch.nn.Module):
+                    units.add(module)
+            for block in expert.blocks:
+                units.update((block.cross_attn, block.ffn))
+                units.update(
+                    getattr(block.self_attn, name)
+                    for name in ('q', 'k', 'v', 'o'))
+        if self.vla_head.proprio_encoder is not None:
+            units.add(self.vla_head.proprio_encoder)
+
+        def policy(module, recurse, nonwrapped_numel):
+            del nonwrapped_numel
+            return recurse or module in units
+
+        return policy
+
     def get_fsdp_wrapping_policy(self) -> Callable:
         # Wrap the whole head (MoT + video/action experts) as a single FSDP
         # unit. FastWAM's MoT does not call ``expert.forward`` -- it invokes
@@ -747,8 +789,8 @@ class FastWAMVLA(BaseVLA):
         # access time, because FSDP only all-gathers around a module's
         # ``forward``. Wrapping at ``FastWAMHead`` makes ``head.forward`` the
         # FSDP boundary, so every parameter the head touches is materialized
-        # for the whole step. The frozen VAE / T5 stay in the root unit and
-        # are gathered at the top-level ``FastWAMVLA.forward``.
+        # for the whole step. Kept as the legacy policy; memory-constrained
+        # training should select the execution-block policy instead.
         return build_module_wrap_policy({FastWAMHead})
 
     @property
