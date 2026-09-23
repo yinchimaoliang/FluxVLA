@@ -1,10 +1,14 @@
 # Copyright 2026 Limx Dynamics
-"""Opt-in selective FP32 protection for native 42-D basket BF16 training.
+"""Historical AdaRMS-only recipe; long-run basket loss degradation observed.
+
+For the additional attention/early-expert protection from ada0381668, use:
+pi05_paligemma_basket_all_rtc_bf16_expert6_fp32_full_finetune.py.
+Checking out that commit does not change the precision in this recipe.
 
 Preserve FP32 residual streams and the expert's 37 AdaRMS condition
 projections. Transformer attention and FFN matrix operations retain BF16
 autocast. The original basket and full-FP32 recipes keep their old defaults.
-Use a fresh work directory for this numerical correction.
+This file is retained to reproduce historical experiments.
 
 The inference section supplies precision defaults for a robot deployment
 config inheriting this recipe. The deployment config must also provide its
@@ -12,6 +16,15 @@ runner type, dataset, denormalizer and operator.
 """
 
 _base_ = ['./pi05_paligemma_basket_all_rtc_full_finetune.py']
+
+training_recipe_warning = (
+    'This historical PI05 basket recipe only protects AdaRMS and residuals; '
+    'long-run loss degradation was observed. The attention/early-expert '
+    'protection from ada0381668 is NOT enabled by this config by default. '
+    'Use configs/pi05/'
+    'pi05_paligemma_basket_all_rtc_bf16_expert6_fp32_full_finetune.py '
+    'in a fresh work directory to enable that additional protection. '
+    'Its six-epoch convergence has not yet been verified.')
 
 model = dict(
     enable_mixed_precision_training=True,

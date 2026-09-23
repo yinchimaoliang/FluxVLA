@@ -13,6 +13,9 @@ and execution checks do not establish long-run convergence.
 
 _base_ = ['./pi05_paligemma_basket_all_rtc_bf16_adarms_fp32_full_finetune.py']
 
+# This child explicitly enables the protection absent from the parent recipe.
+training_recipe_warning = None
+
 model = dict(
     llm_backbone=dict(attention_math_fp32=True),
     llm_expert=dict(attention_math_fp32=True, fp32_layers=(0, 1, 2, 3, 4, 5)))

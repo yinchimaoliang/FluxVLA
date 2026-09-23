@@ -429,6 +429,10 @@ def train(args, cfg):
     Args:
         cfg (Config): The configuration object containing training settings.
     """
+    recipe_warning = cfg.get('training_recipe_warning')
+    if recipe_warning and overwatch.is_rank_zero():
+        overwatch.warning(recipe_warning)
+
     seed = _resolve_train_seed(cfg)
     if seed is not None:
         set_global_seed(seed)
