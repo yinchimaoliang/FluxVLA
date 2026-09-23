@@ -22,8 +22,13 @@
 #     linear warmup (3%) -> cosine decay to 2.5e-6, grad clip 1.0
 #   - EMA 0.99 (checkpoints store EMA weights for evaluation), seed 42
 #   - clean/randomized sources are sampled 1:1, independently of their sizes
-#   - global batch = 8 x GPU count x gradient accumulation; train for three
+#   - sample episodes uniformly within each source, then frames within episodes
+#     (equal demonstrations per task makes task exposure equal as well)
+#   - global batch = 8 x GPU count x gradient accumulation; train for two
 #     balanced epochs (each epoch has 2 * max(source frame counts) samples)
+# The previous three-epoch run peaked on clean at epoch 2 (75.66%); epoch 3
+# regressed to 73.20% despite lower loss. Re-evaluate both domains after this
+# sampling change; a shorter cosine schedule is a new training experiment.
 # This is a mixed-data training recipe, not a reproduction of the published
 # StarVLA score. Do not cap it at the old 10k steps: that run saw only 0.42
 # passes over its 6.08M source frames at global batch 256.
@@ -161,6 +166,7 @@ train_dataloader = dict(
     dataset=dict(
         type='DistributedBalancedRepeatingDataset',
         sampling_weights=[1.0, 1.0],
+        sampling_unit='episode',
         seed=42,
         reshuffle_each_epoch=True,
         # Keep state and action statistics separate: action statistics are
@@ -248,11 +254,12 @@ train_dataloader = dict(
 runner = dict(
     type='FSDPTrainRunner',
     # Epoch length follows the balanced sampler, not raw concatenation.
-    # At a 1:10 source-size ratio, three epochs provide ~3 randomized passes
-    # and ~30 clean passes. Check clean AND random evaluation for overfitting.
+    # Each epoch draws 2 * max(source frame counts) samples. Episode-uniform
+    # sampling gives shorter demonstrations the same weight as longer ones.
+    # Select checkpoints by clean AND random rollouts, rather than train loss.
     # max_steps=None selects the runner's epoch_based training loop.
     max_steps=None,
-    max_epochs=3,
+    max_epochs=2,
     save_epoch_interval=1,
     max_keep_ckpts=3,
     ema_decay=0.99,
@@ -362,7 +369,10 @@ eval = dict(
     type='RobotwinEvalRunner',
     model_family='pi05',
     task_list=_ROBOTWIN_TASK_LIST,
-    eval_chunk_size=50,
+    # Predict 50 actions, execute 10, then replan from a fresh observation.
+    # Epoch-2 pilot: 33/50 successes with execution window 50 vs 38/50 with
+    # window 10 across five tasks. Full clean/random validation is pending.
+    eval_chunk_size=10,
     num_trials_per_task=100,
     seed=7,
     dataset=dict(
