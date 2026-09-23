@@ -14,7 +14,7 @@ Mapped parameters with matching shapes load normally. The 42-D action input
 weight, output weight and output bias retain their constructor initialization;
 the shape-compatible action input bias still loads from the checkpoint.
 This recipe retains its original precision behavior. Use the separate
-bf16_adarms_fp32 config to enable selective FP32 protection, or the fp32
+bf16_expert6_fp32 config to enable selective FP32 protection, or the fp32
 config for a full-precision control.
 Use scripts/train.py so automatic action-window statistics are computed.
 Do not replace those statistics with episode-averaged quantiles.

@@ -12,6 +12,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from fluxvla.engines import build_vla_from_cfg
 from fluxvla.engines.utils.model_utils import sdpa_math_fp32_attention_forward
 from fluxvla.models.backbones.llms.condition_gemma import ConditionGemmaModel
+from fluxvla.models.vlas.pi0_flowmatching import PI0FlowMatching
 
 
 @pytest.mark.parametrize('device', ['cpu', 'cuda'])
@@ -194,3 +195,98 @@ def test_new_recipe_keeps_native_actions_and_legacy_precision_defaults():
         assert model.attention_interface is sdpa_math_fp32_attention_forward
         assert [layer.mlp.compute_fp32 for layer in model.llm_expert.layers
                 ] == [True] * 6 + [False] * 12
+
+
+@pytest.mark.parametrize('variant', ['full_finetune', 'rtc_inference'])
+def test_aloha_precision_recipe_training_and_cached_inference(variant):
+    root = Path(__file__).resolve().parents[2] / 'configs/pi05'
+    legacy = Config.fromfile(root / 'pi05_paligemma_aloha_full_finetune.py')
+    cfg = Config.fromfile(
+        root / f'pi05_paligemma_aloha_bf16_expert6_fp32_{variant}.py')
+    assert cfg.train_dataloader == legacy.train_dataloader
+    assert cfg.runner == legacy.runner
+    assert cfg.inference.dataset == legacy.inference.dataset
+    assert cfg.inference.denormalize_action == legacy.inference.denormalize_action  # noqa: E501
+    assert cfg.inference.keep_params_fp32
+    assert cfg.inference.enable_mixed_precision
+    assert cfg.model == cfg.inference_model
+    assert cfg.model.ori_action_dim == 14
+    assert cfg.model.max_action_dim == cfg.model.loss_action_dim == 32
+    assert cfg.model.n_action_steps == cfg.inference.action_chunk == 50
+    assert not legacy.model.llm_expert.get('adarms_fp32', False)
+    assert not legacy.model.llm_expert.get('fp32_layers', ())
+    assert not legacy.model.llm_backbone.get('attention_math_fp32', False)
+
+    # Use the real recipe, reducing only backbone widths/depth and image size.
+    # Retain all six protected blocks, one BF16 block and Aloha action shapes.
+    model_cfg = copy.deepcopy(dict(cfg.inference_model))
+    for branch in ('llm_backbone', 'llm_expert'):
+        model_cfg[branch].update(
+            vocab_size=64,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=7,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            head_dim=8)
+    model_cfg['llm_expert']['adarms_cond_dim'] = 16
+    model_cfg['vision_backbone']['vision_config'].update(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        image_size=8,
+        patch_size=4)
+    for key, in_dim, out_dim in (
+        ('projector', 16, 16),
+        ('time_mlp_in', 16, 16),
+        ('time_mlp_out', 16, 16),
+        ('action_in_proj', 32, 16),
+        ('action_out_proj', 16, 32),
+    ):
+        model_cfg[key].update(in_dim=in_dim, out_dim=out_dim)
+    model_cfg.update(proj_width=16, num_steps=2)
+    policy = build_vla_from_cfg(model_cfg).float().eval()
+    # A kernel policy would bypass Gemma's precision switches at inference.
+    assert policy.predict_action.__func__ is PI0FlowMatching.predict_action
+    assert policy.attention_interface is sdpa_math_fp32_attention_forward
+    assert [layer.mlp.compute_fp32
+            for layer in policy.llm_expert.layers] == [True] * 6 + [False]
+    inputs = dict(
+        images=torch.randn(2, 9, 8, 8),
+        img_masks=torch.tensor([[True] * 3, [True, True, False]]),
+        lang_tokens=torch.tensor([[1, 5, 2, 0], [1, 7, 3, 2]]),
+        lang_masks=torch.tensor([[True, True, True, False], [True] * 4]),
+        states=torch.randn(2, 32),
+        noise=torch.randn(2, 50, 32))
+    with torch.autocast('cpu', dtype=torch.bfloat16):
+        output = policy(
+            **inputs,
+            actions=torch.randn(2, 50, 32),
+            time=torch.tensor([0.25, 0.75]))
+    assert torch.isfinite(output['loss'])
+    output['loss'].backward()
+    for module in (policy.vision_backbone, policy.llm_backbone,
+                   policy.llm_expert, policy.time_mlp_in):
+        grads = [p.grad for p in module.parameters() if p.grad is not None]
+        assert grads and all(torch.isfinite(grad).all() for grad in grads)
+        assert any(grad.abs().sum() > 0 for grad in grads)
+
+    rtc = {}
+    if variant == 'rtc_inference':
+        assert cfg.inference.type == 'AlohaRTCInferenceRunner'
+        rtc = dict(
+            prev_actions=torch.randn(2, 50, 32),
+            prefix_len=cfg.inference.rtc_config.prefix_len,
+            rtc_config=dict(cfg.inference.rtc_config))
+    with torch.no_grad(), torch.autocast('cpu', dtype=torch.bfloat16):
+        actions = policy.predict_action(**inputs, **rtc)
+    assert actions.shape == (2, 50, 32)
+    assert torch.isfinite(actions).all()
+    if rtc:
+        length = rtc['prefix_len']
+        torch.testing.assert_close(
+            actions[:, :length],
+            rtc['prev_actions'][:, :length],
+            rtol=0,
+            atol=0)
