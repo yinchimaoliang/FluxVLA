@@ -19,6 +19,10 @@ steps are normalized using per-offset relative min/max bounds, then padded
 to the model's native 40 x 132 target shape. Inference returns 16 steps.
 Start from the original GR00T checkpoint, not the legacy absolute-action run.
 The five-epoch budget is an initial validation cap, not a source score claim.
+The reference-style repair recipe freezes the pretrained vision/language
+backbone and trains the action head. This deliberately replaces the former
+all-VLM 1e-4 recipe; do not resume its optimizer or overwrite an earlier run.
+The filename is retained as the single RoboDojo experiment entry point.
 """
 
 _base_ = ['./gr00tn17_qwen3vl_2b_libero_10_full_finetune.py']
@@ -30,6 +34,9 @@ _EMBODIMENT_KEY = 'new_embodiment'
 _EMBODIMENT_ID = 10
 _QWEN_TOKENIZER_PATH = 'fluxvla/models/third_party_models/qwen3_tokenizer'
 _ACTION_WINDOW_SIZE = 16
+
+# Unlike the dataset shuffle seed, this also seeds model/training randomness.
+seed = 42
 _RELATIVE_ACTION_MASK = [True] * 14
 _N17_LAYOUT = (('left_arm', 7), ('right_arm', 7))
 
@@ -445,6 +452,10 @@ model = dict(
     embodiment_tag=_EMBODIMENT_KEY,
     processor_kwargs=dict(_delete_=True, **_PROCESSOR_KWARGS),
     use_relative_action=True,
+    # The reference RoboDojo N1.7 recipe freezes vision and language.
+    # Prevent the small robot dataset from updating the entire pretrained VLM
+    # at the action head's LR. This is a NEW training recipe, not an eval fix.
+    freeze_vlm_backbone=True,
 )
 
 # Restore the fine-tuned FluxVLA weights without reopening the source model.
@@ -606,6 +617,13 @@ runner = dict(
     max_keep_ckpts=10,
     enable_gradient_checkpointing=True,
     keep_params_fp32=True,
+    evaluator=dict(
+        type='training-eval',
+        eval_every=1000,
+        num_inference_steps=4,
+        seed=42,
+        save_video=False,
+    ),
     metric=dict(active_trackers=('jsonl', 'wandb')),
 )
 
