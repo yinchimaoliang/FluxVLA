@@ -88,7 +88,7 @@ class LiberoEvalRunner(BaseEvalRunner):
         dataset (Dict): Configuration for the dataset to be used in evaluation.
         denormalize_action (Dict): Configuration for denormalizing actions.
         norm_stats_path (str): Optional explicit dataset statistics path.
-        dataset_stats_path (str): Alias for ``norm_stats_path`` used by main.
+        dataset_stats_path (str): Compatibility alias for ``norm_stats_path``.
         requires_dataset_stats (bool): Whether missing dataset statistics
             should fail runner construction. Defaults to True.
         eval_chunk_size (int): Size of the chunks for evaluation.
@@ -421,7 +421,6 @@ class LiberoEvalRunner(BaseEvalRunner):
                  denormalize_action: Dict,
                  norm_stats_key: str = None,
                  norm_stats_path: str = None,
-                 requires_dataset_stats: bool = True,
                  eval_chunk_size: int = 1,
                  resize_size: int = 224,
                  num_trials_per_task: int = 50,
@@ -440,12 +439,13 @@ class LiberoEvalRunner(BaseEvalRunner):
                  save_multi_view_rollout_videos: bool = False,
                  rollout_dir: str = None,
                  run_id_suffix: str = None,
-                 output_dir: str = None,
                  result_output_dir: str = None,
                  result_gpu_id: int = None,
                  mixed_precision_dtype: str = 'bf16',
                  enable_mixed_precision_training: bool = True,
-                 dataset_stats_path: str = None):
+                 dataset_stats_path: str = None,
+                 requires_dataset_stats: bool = True,
+                 output_dir: str = None):
         from fluxvla.engines import (build_dataset_from_cfg,
                                      build_transform_from_cfg,
                                      build_vla_from_cfg)
@@ -509,15 +509,14 @@ class LiberoEvalRunner(BaseEvalRunner):
             raise ValueError('norm_stats_path and dataset_stats_path must '
                              'refer to the same statistics file.')
         data_stat_path = (
-            norm_stats_path if norm_stats_path is not None else
-            dataset_stats_path)
+            norm_stats_path
+            if norm_stats_path is not None else dataset_stats_path)
         if data_stat_path is None and self.ckpt_path is not None:
             data_stat_path = self.default_stats_path(self.ckpt_path)
         if requires_dataset_stats:
             assert data_stat_path is not None, (
                 'norm_stats_path, dataset_stats_path or ckpt_path is required '
-                'for this '
-                'LIBERO evaluation config.')
+                'for this LIBERO evaluation config.')
         if data_stat_path is not None:
             assert os.path.exists(data_stat_path), \
                 f'Dataset statistics file not found at {data_stat_path}!'

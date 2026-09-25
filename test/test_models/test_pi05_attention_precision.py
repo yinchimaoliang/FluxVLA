@@ -174,27 +174,35 @@ def test_math_attention_preserves_implicit_causal_mask():
 def test_new_recipe_keeps_native_actions_and_legacy_precision_defaults():
     root = Path(__file__).resolve().parents[2]
     path = root / 'configs/pi05'
-    old = Config.fromfile(
-        str(path /
-            'pi05_paligemma_basket_all_rtc_bf16_adarms_fp32_full_finetune.py'))
+    old = Config.fromfile(str(path / 'pi05_paligemma_aloha_full_finetune.py'))
     new = Config.fromfile(
-        str(path /
-            'pi05_paligemma_basket_all_rtc_bf16_expert6_fp32_full_finetune.py')
-    )
+        str(path / 'pi05_paligemma_aloha_bf16_expert6_fp32_full_finetune.py'))
     assert dict(new.runner) == dict(old.runner)
-    assert new.runner.max_keep_ckpts == 2
-    assert new.model.max_action_dim == new.model.loss_action_dim == 42
+    assert new.model.ori_action_dim == old.model.ori_action_dim == 14
+    assert new.model.max_action_dim == new.model.loss_action_dim == 32
     for section in ('model', 'inference_model'):
         expected = copy.deepcopy(dict(old[section]))
+        expected.update(
+            enable_mixed_precision_training=True, preserve_fp32_residuals=True)
+        expected['vision_backbone']['preserve_fp32_residuals'] = True
         expected['llm_backbone']['attention_math_fp32'] = True
         expected['llm_expert'].update(
-            attention_math_fp32=True, fp32_layers=(0, 1, 2, 3, 4, 5))
+            adarms_fp32=True,
+            attention_math_fp32=True,
+            fp32_layers=(0, 1, 2, 3, 4, 5))
         assert dict(new[section]) == expected
         with torch.device('meta'):
             model = build_vla_from_cfg(new[section])
+            legacy = build_vla_from_cfg(old[section])
         assert model.attention_interface is sdpa_math_fp32_attention_forward
         assert [layer.mlp.compute_fp32 for layer in model.llm_expert.layers
                 ] == [True] * 6 + [False] * 12
+        assert not legacy.preserve_fp32_residuals
+        assert not legacy.vision_backbone.preserve_fp32_residuals
+        assert not legacy.llm_expert.config.adarms_fp32
+        assert not legacy.llm_expert.config.attention_math_fp32
+        assert not any(layer.mlp.compute_fp32
+                       for layer in legacy.llm_expert.layers)
 
 
 @pytest.mark.parametrize('variant', ['full_finetune', 'rtc_inference'])

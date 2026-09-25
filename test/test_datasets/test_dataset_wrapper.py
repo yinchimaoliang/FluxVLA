@@ -34,6 +34,7 @@ def _make_balanced_wrapper(*,
         DistributedBalancedRepeatingDataset)
     wrapper.source_lengths = list(source_lengths)
     wrapper.sampling_probabilities = sampling_probabilities
+    wrapper._source_episodes = None
     wrapper.total_len = total_len
     wrapper.seed = seed
     wrapper.shuffle = shuffle
