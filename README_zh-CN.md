@@ -21,6 +21,15 @@
 
 FluxVLA Engine是面向具身智能落地应用的全链路一体化工程平台，以统一配置、标准接口、模块解耦、可部署为核心设计理念，构建从数据到真机部署的完整工程闭环，并以“标准化产学研基座”为目标，显著降低 VLA 研究与开发的工程门槛。
 
+## 真机演示
+
+<p align="center">
+  <img src="docs/fluxvla-real-robot-demo-compressed.gif" alt="FluxVLA 真机任务演示" width="800">
+</p>
+<p align="center">
+  <em>移动操作、桌面整理、双臂叠布与袋内取物（加速播放）。</em>
+</p>
+
 ## 框架
 
 <p align="center">

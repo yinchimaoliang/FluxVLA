@@ -21,6 +21,15 @@ English | [简体中文](README_zh-CN.md) | [日本語](README_ja.md)
 
 FluxVLA Engine is a full-stack, end-to-end engineering platform for deploying embodied intelligence applications. Built on the core design principles of unified configuration, standardized interfaces, module decoupling, and deployability, it creates a complete engineering loop from data to real-device deployment. With the goal of providing a standardized industry–academia–research foundation, it significantly lowers the engineering barrier for VLA research and development.
 
+## Real-Robot Demos
+
+<p align="center">
+  <img src="docs/fluxvla-real-robot-demo-compressed.gif" alt="FluxVLA real-robot demonstrations" width="800">
+</p>
+<p align="center">
+  <em>Mobile manipulation, tabletop tidying, bimanual cloth folding, and object retrieval from a bag (accelerated playback).</em>
+</p>
+
 ## Framework
 
 <p align="center">
