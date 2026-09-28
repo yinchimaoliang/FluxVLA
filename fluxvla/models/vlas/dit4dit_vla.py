@@ -247,15 +247,16 @@ class DiT4DiTVLA(BaseVLA):
         )
         last_hidden = backbone_outputs.last_hidden_state
         attention_mask = backbone_outputs.attention_mask
-        actions = actions.to(
-            device=last_hidden.device, dtype=last_hidden.dtype)
+        action_dtype = (
+            getattr(self.vla_head, 'diffusion_dtype', None)
+            or last_hidden.dtype)
+        actions = actions.to(device=last_hidden.device, dtype=action_dtype)
         # Keep the validity mask discrete. The source DiT4DiT collator passes
         # a bool mask into the action head rather than casting it with the
         # floating-point model inputs.
         action_masks = action_masks.to(device=last_hidden.device)
         if states is not None:
-            states = states.to(
-                device=last_hidden.device, dtype=last_hidden.dtype)
+            states = states.to(device=last_hidden.device, dtype=action_dtype)
 
         repeat = max(1, self.repeated_diffusion_steps)
         if repeat > 1:
@@ -304,9 +305,11 @@ class DiT4DiTVLA(BaseVLA):
             lang_masks=lang_masks,
         )
         last_hidden = backbone_outputs.last_hidden_state
+        action_dtype = (
+            getattr(self.vla_head, 'diffusion_dtype', None)
+            or last_hidden.dtype)
         if states is not None:
-            states = states.to(
-                device=last_hidden.device, dtype=last_hidden.dtype)
+            states = states.to(device=last_hidden.device, dtype=action_dtype)
         with self._action_head_autocast(last_hidden):
             actions = self.vla_head.predict_action(
                 input_features=last_hidden,

@@ -16,7 +16,7 @@
 # DiT4DiT/model/modules/action_model/ActionDiT.py
 
 from __future__ import annotations
-from typing import Callable, Dict, Optional, Type
+from typing import Callable, Dict, Optional, Type, Union
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,7 @@ from torch.distributions import Beta
 
 from fluxvla.engines import HEADS
 from fluxvla.engines.utils.fsdp_wrapping import build_module_wrap_policy
+from fluxvla.engines.utils.name_map import str_to_dtype
 from fluxvla.models.blocks.cross_attention_dit import (BasicTransformerBlock,
                                                        DiT)
 from fluxvla.models.heads.flow_matching_head import (
@@ -91,6 +92,11 @@ class DiT4DiTActionHead(nn.Module):
     It intentionally omits the token-compression and multi-embodiment layers
     used by FluxVLA's generic ``FlowMatchingHead`` because DiT4DiT trains
     the action DiT against the selected Cosmos transformer layer features.
+
+    ``diffusion_dtype='fp32'`` keeps targets, noise, flow times and the Euler
+    trajectory in FP32 even with BF16 Cosmos features. The training runner
+    must also preserve FP32 batch inputs; upcasting rounded targets here
+    cannot recover their precision. None preserves released-source behavior.
     """
 
     def __init__(
@@ -111,6 +117,7 @@ class DiT4DiTActionHead(nn.Module):
         num_timestep_buckets: int = 1000,
         ori_action_dim: Optional[int] = None,
         output_action_dim: Optional[int] = None,
+        diffusion_dtype: Optional[Union[str, torch.dtype]] = None,
         *args,
         **kwargs,
     ) -> None:
@@ -142,6 +149,11 @@ class DiT4DiTActionHead(nn.Module):
         self.num_timestep_buckets = int(num_timestep_buckets)
         self.noise_s = float(noise_s)
         self.ori_action_dim = output_action_dim or ori_action_dim
+        self.diffusion_dtype = (
+            str_to_dtype(diffusion_dtype)
+            if isinstance(diffusion_dtype, str) else diffusion_dtype)
+        if self.diffusion_dtype not in (None, torch.float32):
+            raise ValueError('diffusion_dtype must be None or float32.')
 
         self.model = DiT(**diffusion_model_cfg)
         self.input_embedding_dim = (
@@ -261,7 +273,9 @@ class DiT4DiTActionHead(nn.Module):
             raise ValueError('DiT4DiTActionHead requires input features, '
                              'actions, and action masks.')
         device = vl_embs.device
-        actions = actions.to(device=device, dtype=vl_embs.dtype)
+        diffusion_dtype = self.diffusion_dtype or vl_embs.dtype
+        actions = actions.to(device=device, dtype=diffusion_dtype)
+        vl_embs = vl_embs.to(dtype=diffusion_dtype)
         action_mask = action_mask.to(device=device, dtype=torch.bool)
 
         # Use the same factory call as the source implementation so a shared
@@ -321,6 +335,7 @@ class DiT4DiTActionHead(nn.Module):
             raise ValueError('DiT4DiTActionHead requires input features.')
         batch_size = vl_embs.shape[0]
         device = vl_embs.device
+        vl_embs = vl_embs.to(dtype=self.diffusion_dtype or vl_embs.dtype)
         actions = torch.randn(
             batch_size,
             self.action_horizon,

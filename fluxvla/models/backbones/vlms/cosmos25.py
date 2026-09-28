@@ -62,6 +62,9 @@ class Cosmos25Backbone(nn.Module):
     Args:
         model_id_or_path: Local path or HF id for Cosmos-Predict2.5.
         revision: HF revision. DiT4DiT uses ``diffusers/base/post-trained``.
+        transformer_param_dtype: Optional parameter dtype for the trainable
+            transformer, independent of the frozen text encoder and VAE.
+            Use FP32 with a runner that keeps FP32 parameters under autocast.
         torch_dtype: dtype used to load Cosmos modules.
         local_files_only: Passed to ``from_pretrained``.
         load_pretrained_weights: Load Cosmos model weights during
@@ -105,6 +108,7 @@ class Cosmos25Backbone(nn.Module):
         fsdp_min_num_params: int = 10_000_000,
         device: Optional[Union[str, torch.device]] = None,
         safety_checker: Optional[Any] = None,
+        transformer_param_dtype: Optional[Union[str, torch.dtype]] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -147,6 +151,14 @@ class Cosmos25Backbone(nn.Module):
         pipe = self._build_pipeline(safety_checker)
         self.text_encoder = pipe.text_encoder
         self.transformer = pipe.transformer
+        # FSDP recipes with FP32 master/compute parameters must also retain
+        # those learned values when building an unwrapped inference model.
+        # Cast parameters only: rotary-frequency buffers must stay intact.
+        if transformer_param_dtype is not None:
+            if isinstance(transformer_param_dtype, str):
+                transformer_param_dtype = str_to_dtype(transformer_param_dtype)
+            for param in self.transformer.parameters():
+                param.data = param.data.to(dtype=transformer_param_dtype)
         self.vae = pipe.vae
         self.scheduler = pipe.scheduler
         self.video_processor = pipe.video_processor

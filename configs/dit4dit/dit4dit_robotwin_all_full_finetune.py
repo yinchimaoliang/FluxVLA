@@ -7,6 +7,10 @@ The 14D state uses interleaved sin/cos padded to 32. All three cameras
 are tiled into a 336x224 video; train and eval share [-1, 1] image inputs.
 Two balanced epochs are an initial budget, not a source RoboTwin result.
 Evaluate random scenes with eval.task_suite_name=random.
+
+This absolute-action recipe is retained for existing checkpoints. For new
+training, use dit4dit_robotwin_all_delta_finetune.py (FP32 flow targets and
+state-relative joint actions). Its statistics and checkpoints are separate.
 """
 
 _DATA_ROOTS = [
