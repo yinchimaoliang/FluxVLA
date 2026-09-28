@@ -65,6 +65,7 @@ class DreamZeroVLA(BaseVLA):
         freeze_vlm_backbone: bool = True,
         freeze_projector: bool = True,
         use_cache: bool = True,
+        pretrained_skip_prefixes: Optional[List[str]] = None,
         *args,
         **kwargs,
     ) -> None:
@@ -74,6 +75,7 @@ class DreamZeroVLA(BaseVLA):
             pretrained_name_or_path=pretrained_name_or_path,
             name_mapping=name_mapping,
             strict_mapping=strict_mapping,
+            pretrained_skip_prefixes=pretrained_skip_prefixes,
             freeze_llm_backbone=freeze_llm_backbone,
             freeze_vlm_backbone=freeze_vlm_backbone,
             freeze_projector=freeze_projector,
@@ -305,13 +307,18 @@ class DreamZeroVLA(BaseVLA):
             self.vlm_backbone.set_frozen_modules_to_eval_mode()
             prompt_embs = self._encode_wan_prompts(
                 lang_tokens.to(device), lang_masks.to(device))
-            latents = self.vlm_backbone.encode_video(video_for_latents)
-            clip_feas, image_cond, _ = self.vlm_backbone.encode_image(
-                condition_image.transpose(1, 2),
-                self.frame_window_size,
-                h,
-                w,
-            )
+            clip_feas, image_cond, condition_latent = (
+                self.vlm_backbone.encode_image(
+                    condition_image.transpose(1, 2),
+                    self.frame_window_size,
+                    h,
+                    w,
+                ))
+            if initial_cache_fill and self.vla_head.official_inference:
+                # Upstream pre-fills with the image-conditioning latent.
+                latents = condition_latent
+            else:
+                latents = self.vlm_backbone.encode_video(video_for_latents)
             observed_latent_frames = latents.shape[2]
         else:
             # Stateless inference keeps the previous behavior: pad video to the
@@ -365,7 +372,8 @@ class DreamZeroVLA(BaseVLA):
         if self.use_cache:
             head_kwargs['observed_latent_frames'] = observed_latent_frames
 
-        return self.vla_head.predict_action(**head_kwargs)
+        # NumPy-based evaluation cannot consume BF16 tensors.
+        return self.vla_head.predict_action(**head_kwargs).float()
 
     # ------------------------------------------------------------------
     # BaseVLA abstract method implementations
