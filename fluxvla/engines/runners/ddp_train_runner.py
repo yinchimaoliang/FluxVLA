@@ -276,8 +276,8 @@ class DDPTrainRunner(BaseTrainRunner):
             # Collect checkpoint layer classes (same as FSDP)
             checkpoint_layer_classes = set()
 
-            # Add LLM backbone transformer layers
-            if hasattr(self, 'llm_transformer_layer_cls'):
+            # Models such as DreamZero have no LLM transformer layer class.
+            if getattr(self, 'llm_transformer_layer_cls', None) is not None:
                 checkpoint_layer_classes.add(self.llm_transformer_layer_cls)
 
             # Add Vision Transformer blocks (for timm models)
@@ -290,7 +290,8 @@ class DDPTrainRunner(BaseTrainRunner):
             # Add LLM expert layers
             if hasattr(self.vla,
                        'llm_expert') and self.vla.llm_expert is not None:
-                if hasattr(self.vla.llm_expert, 'transformer_layer_cls'):
+                if getattr(self.vla.llm_expert, 'transformer_layer_cls',
+                           None) is not None:
                     checkpoint_layer_classes.add(
                         self.vla.llm_expert.transformer_layer_cls)
 
