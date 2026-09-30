@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .dict_collator import DictCollator  # noqa: F401, F403
+from .dreamzero_collator import DreamZeroCollator  # noqa: F401, F403
 from .nested_collator import NestedCollator  # noqa: F401, F403
 from .padded_action_prediction_collator import \
     PaddedCollatorForActionPrediction  # noqa: F401, F403

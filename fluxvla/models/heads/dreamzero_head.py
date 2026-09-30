@@ -250,6 +250,19 @@ class DreamZeroHead(nn.Module):
     # ------------------------------------------------------------------
     # Training forward
     # ------------------------------------------------------------------
+    @staticmethod
+    def _reduce_temporal_loss(losses, valid_lengths=None, sample_weight=None):
+        if valid_lengths is not None:
+            # Normalize each sample by its original length, so adding future
+            # padding neither dilutes its loss nor changes its batch weight.
+            valid = (
+                torch.arange(losses.shape[1], device=losses.device)[None] <
+                valid_lengths[:, None])
+            losses = (losses.masked_fill(~valid, 0).sum(dim=1) /
+                      valid_lengths.clamp_min(1)).unsqueeze(1)
+        return reduce_action_bc_loss(
+            losses.unsqueeze(-1), sample_weight=sample_weight)
+
     def forward(
         self,
         prompt_embs: torch.Tensor,
@@ -260,6 +273,7 @@ class DreamZeroHead(nn.Module):
         actions: torch.Tensor,
         action_masks: torch.Tensor,
         embodiment_ids: torch.Tensor,
+        num_valid_blocks: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Dict:
         """Training forward pass with flow-matching loss.
@@ -274,11 +288,32 @@ class DreamZeroHead(nn.Module):
             actions: ``[B, action_horizon, action_dim]`` in **[-1,1]**.
             action_masks: ``[B, action_horizon, action_dim]`` boolean.
             embodiment_ids: ``[B]`` integer embodiment category.
+            num_valid_blocks: ``[B]`` unpadded block counts, if the batch was
+                padded by DreamZeroCollator. Padding must be at the end.
 
         Returns:
             dict with ``loss``, ``dynamics_loss``, ``action_loss``.
         """
         device = actions.device
+        valid_video_lengths = valid_action_lengths = None
+        if num_valid_blocks is not None:
+            num_valid_blocks = num_valid_blocks.to(device=device)
+            max_blocks = (latents.shape[2] - 1) // self.num_frame_per_block
+            if (num_valid_blocks.shape != (actions.shape[0], )
+                    or num_valid_blocks.is_floating_point()
+                    or (num_valid_blocks < 1).any()
+                    or (num_valid_blocks > max_blocks).any()):
+                raise ValueError('num_valid_blocks must contain one valid '
+                                 'positive block count per sample.')
+            if (actions.shape[1] != max_blocks * self.num_action_per_block
+                    or states.shape[1] != max_blocks * self.num_state_per_block
+                    or latents.shape[2] !=
+                    1 + max_blocks * self.num_frame_per_block):
+                raise ValueError('Padded video, actions and states must have '
+                                 'the same number of complete blocks.')
+            valid_video_lengths = (1 +
+                                   num_valid_blocks * self.num_frame_per_block)
+            valid_action_lengths = num_valid_blocks * self.num_action_per_block
 
         # --- Flow-matching noise ---
         noise = torch.randn_like(latents)
@@ -372,8 +407,8 @@ class DreamZeroHead(nn.Module):
             self.scheduler.training_weight(timestep.flatten(0, 1)).unflatten(
                 0, (noise.shape[0], noise.shape[1])).to(device))
         sample_weight = kwargs.get('sample_weight')
-        weighted_dynamics_loss = reduce_action_bc_loss(
-            weight_dyn.unsqueeze(-1), sample_weight=sample_weight)
+        weighted_dynamics_loss = self._reduce_temporal_loss(
+            weight_dyn, valid_video_lengths, sample_weight=sample_weight)
 
         action_loss_raw = F.mse_loss(
             action_noise_pred.float(),
@@ -385,8 +420,8 @@ class DreamZeroHead(nn.Module):
                 timestep_action.flatten(0, 1)).unflatten(
                     0,
                     (noise_action.shape[0], noise_action.shape[1])).to(device))
-        weighted_action_loss = reduce_action_bc_loss(
-            weight_act.unsqueeze(-1), sample_weight=sample_weight)
+        weighted_action_loss = self._reduce_temporal_loss(
+            weight_act, valid_action_lengths, sample_weight=sample_weight)
 
         loss = weighted_dynamics_loss + weighted_action_loss
 

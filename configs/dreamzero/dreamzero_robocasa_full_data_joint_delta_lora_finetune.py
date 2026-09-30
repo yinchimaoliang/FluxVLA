@@ -17,7 +17,13 @@ From the repo root (use a new work_dir; do not checkout the old commit):
   ROBOCASA_DATA_ROOT=/path/to/robocasa_lerobot_V2.1 WANDB_MODE=disabled \
   bash scripts/train.sh \
   configs/dreamzero/dreamzero_robocasa_full_data_joint_delta_lora_finetune.py \
-  work_dirs/dreamzero_robocasa_joint_delta
+  work_dirs/dreamzero_robocasa_joint_delta \
+  --cfg-options train_dataloader.per_device_batch_size=2 \
+  runner.grad_accumulation_steps=1
+
+The collator pads variable windows to the longest sample in each batch.
+Video/action losses exclude padding and retain equal weight per sample.
+Batch 2 with accumulation 1 gives effective batch 32 on 16 GPUs.
 
 Data: 1..4 blocks, each 24 actions / 8 future RGB frames (stride 3) / one
 raw state anchor. Arms/waist are block-relative; Fourier-hand commands remain
@@ -238,8 +244,8 @@ def _robocasa_task_env(task_name):
 
 
 train_dataloader = dict(
-    # Variable 1..4-block windows cannot be stacked at batch > 1.
-    per_device_batch_size=1,
+    # DreamZeroCollator pads variable 1..4-block windows within each batch.
+    per_device_batch_size=2,
     per_device_num_workers=0,
     dataset=dict(
         type='DistributedRepeatingDataset',
@@ -340,13 +346,19 @@ runner = dict(
     type='DDPTrainRunner',
     max_epochs=None,
     max_steps=100000,
+    # 16 GPUs x 2 samples = effective batch 32.
     grad_accumulation_steps=1,
+    # Static DDP fails on the first no_sync backward during accumulation.
+    static_graph=False,
     optimizer=dict(lr=1e-5, type='AdamW', weight_decay=1e-5),
     max_grad_norm=1.0,
     save_iter_interval=5000,
     max_keep_ckpts=8,
     collator=dict(
-        type='DictCollator',
+        type='DreamZeroCollator',
+        video_frames_per_block=8,
+        actions_per_block=_ACTION_HORIZON,
+        states_per_block=1,
         keys=[
             'states',
             'images',

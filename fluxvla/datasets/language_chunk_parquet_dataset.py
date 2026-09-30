@@ -64,8 +64,8 @@ class LanguageChunkParquetDataset(ParquetDataset):
     """Reuse LeRobot decoding/stats, but sample source-compatible blocks.
 
     Each block uses 24 actions, video stride 3 and one raw state anchor.
-    Use per-device batch size 1: windows have 1..max_chunks blocks and cannot
-    be stacked blindly at different lengths.
+    Windows have 1..max_chunks blocks. Use DreamZeroCollator to pad complete
+    blocks and retain valid lengths when batching multiple samples.
     """
 
     def __init__(self,

@@ -47,6 +47,8 @@ class DreamZeroVLA(BaseVLA):
     * ``action_masks`` – ``[B, action_horizon]`` or
       ``[B, action_horizon, action_dim]`` boolean.
     * ``embodiment_ids`` – ``[B]`` integer (optional, defaults to 0).
+    * ``num_valid_blocks`` – ``[B]`` integer counts before temporal padding
+      (optional, supplied by DreamZeroCollator).
 
     Encoding (T5, CLIP, VAE) is done by ``Wan21Backbone`` (vlm_backbone),
     then encoded tensors are passed to ``DreamZeroHead`` (vla_head).
@@ -184,6 +186,7 @@ class DreamZeroVLA(BaseVLA):
         frame_masks: Optional[torch.Tensor] = None,
         embodiment_ids: Optional[torch.Tensor] = None,
         img_masks: Optional[torch.Tensor] = None,
+        num_valid_blocks: Optional[torch.Tensor] = None,
         # accepted but unused
         task_description: Optional[List[str]] = None,
         **kwargs,
@@ -250,6 +253,7 @@ class DreamZeroVLA(BaseVLA):
             actions=actions,
             action_masks=action_masks,
             embodiment_ids=embodiment_ids,
+            num_valid_blocks=num_valid_blocks,
             sample_weight=kwargs.get('sample_weight'),
         )
 
