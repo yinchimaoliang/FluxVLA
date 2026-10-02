@@ -25,6 +25,9 @@ The collator pads variable windows to the longest sample in each batch.
 Video/action losses exclude padding and retain equal weight per sample.
 Batch 2 with accumulation 1 gives effective batch 32 on 16 GPUs.
 
+Evaluation explicitly places weights in BF16: the merged FP32 checkpoint
+alone occupies about 85.4 GiB, and autocast does not convert model weights.
+
 Data: 1..4 blocks, each 24 actions / 8 future RGB frames (stride 3) / one
 raw state anchor. Arms/waist are block-relative; Fourier-hand commands remain
 absolute. Image/state/prompt use the checkpoint's gr1_unified transform,
@@ -414,6 +417,9 @@ eval = dict(
     },
     enable_mixed_precision_training=True,
     mixed_precision_dtype='bf16',
+    # Autocast alone leaves the 23B-parameter model in FP32 (>80 GiB).
+    # Convert weights while placing them on the rank-local GPU.
+    model_build_dtype='bf16',
     dataset=dict(
         type='RobocasaEvalDataset',
         unnorm_key=_ROBOCASA_STATISTIC_NAME,
