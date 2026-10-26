@@ -2,13 +2,22 @@
 """DiT4DiT full fine-tuning on all RoboDojo ARX-X5 data.
 
 Adapted from dit4dit_robotwin_all_data_full_finetune_horizon32_exec24.py.
-Preserve its Cosmos initialization, optimizer, three-epoch training budget,
-32-step action horizon, and 24-step execution horizon. Absolute 14D joint
-commands are padded to 16; interleaved sin/cos states are padded to 32.
+Preserve its Cosmos initialization, 32-step action horizon, and 24-step
+execution horizon. Absolute 14D joint commands are padded to 16;
+interleaved sin/cos states are padded to 32.
 Train on 9 frames at stride 4, spanning 32 control intervals. Three cameras
 are tiled into a 336x224 video with matching [-1, 1] train/eval inputs.
 Use one RoboDojo dataset, not RoboTwin's clean/randomized 1:1 mixture.
 Evaluation uses the existing RoboDojo Themis task/episode protocol.
+
+Unlike the detached-feature RoboTwin recipe, action loss now updates Cosmos
+as well as the action head. Use the existing RoboDojo 120k-update budget,
+not a GPU-count-dependent three-epoch budget. Keep effective per-rank batch
+size 8 via 2 x 4 accumulation, full sharding, and gradient checkpointing.
+Log sampled-action errors every 1000 updates; these are training-data
+diagnostics, NOT simulator success rates. Evaluate intermediate checkpoints.
+This changes training, not existing checkpoint weights: use a new work dir
+and retrain (or explicitly continue compatible weights with a new schedule).
 """
 
 # Update these paths for the training/evaluation machine.
@@ -73,7 +82,8 @@ model = dict(
         type='Cosmos25Backbone',
         base_model='./checkpoints/Cosmos-Predict2.5-2B',
         conditional_frame_timestep=0.0001,
-        detach_hidden_states=True,
+        # Otherwise Cosmos receives video loss but ZERO action-loss gradient.
+        detach_hidden_states=False,
         extract_layer=17,
         fixed_seed=None,
         flow_matching_high_sigma_min=None,
@@ -206,7 +216,7 @@ train_dataloader = dict(
         statistic_keys=['observation.state', 'timestamp', 'action'],
         statistic_name=_STATISTIC_NAME,
     ),
-    per_device_batch_size=8,
+    per_device_batch_size=2,
     per_device_num_workers=4,
 )
 
@@ -228,22 +238,22 @@ runner = dict(
         ],
         meta_keys=['info', 'stats'],
     ),
-    enable_gradient_checkpointing=False,
+    enable_gradient_checkpointing=True,
     enable_mixed_precision_training=True,
-    grad_accumulation_steps=1,
+    grad_accumulation_steps=4,
     lr_scheduler=dict(
         type='linear-warmup+cosine-decay',
         min_lr=5e-07,
-        warmup_ratio=0.05,
+        warmup_steps=2000,
     ),
-    max_epochs=3,
+    max_epochs=None,
     max_grad_norm=1.0,
     max_keep_ckpts=3,
-    max_steps=None,
+    max_steps=120000,
     metric=dict(
         type='VLAMetric',
         active_trackers=('jsonl', 'wandb'),
-        grad_accumulation_steps=1,
+        grad_accumulation_steps=4,
         run_dir='work_dirs',
         window_size=100,
     ),
@@ -264,9 +274,17 @@ runner = dict(
     reduce_in_full_precision=False,
     sampler=None,
     save_epoch_interval=1,
-    save_iter_interval=10000000,
+    save_iter_interval=2000,
     seed=42,
-    sharding_strategy='global-shard-grad-op',
+    sharding_strategy='full-shard',
+    # Check actual sampled actions conditioned only on the current frame.
+    evaluator=dict(
+        type='training-eval',
+        eval_every=1000,
+        num_inference_steps=4,
+        seed=42,
+        save_video=False,
+    ),
     tokenizer=dict(
         type='PretrainedTokenizer',
         model_max_length=512,
@@ -350,6 +368,8 @@ eval = dict(
     denormalize_action=dict(
         type='DenormalizePrivateAction',
         action_dim=14,
+        # Match the existing RoboDojo policy's bounded joint/gripper targets.
+        clip_normalized_action=True,
         norm_type='min_max',
         statistic_name=_STATISTIC_NAME,
     ),

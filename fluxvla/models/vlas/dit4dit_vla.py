@@ -229,9 +229,25 @@ class DiT4DiTVLA(BaseVLA):
         action_masks: Optional[torch.Tensor] = None,
         lang_tokens: Optional[torch.Tensor] = None,
         lang_masks: Optional[torch.Tensor] = None,
+        forward_mode: str = 'train',
+        training_eval_batch: Optional[Dict] = None,
+        num_inference_steps: Optional[int] = None,
+        seed: int = 42,
         **kwargs,
     ) -> Dict:
         del kwargs
+        # Enter through the root FSDP forward so head parameters are gathered.
+        if forward_mode == 'training_eval':
+            if training_eval_batch is None:
+                raise ValueError('training_eval requires training_eval_batch.')
+            return self.compute_training_eval(
+                training_eval_batch,
+                num_inference_steps=num_inference_steps,
+                seed=seed,
+            )
+        if forward_mode != 'train':
+            raise ValueError(f'Unsupported DiT4DiT forward_mode: '
+                             f'{forward_mode!r}')
         images = self._validate_images(images)
         batch_size = images.shape[0]
         lang_tokens, lang_masks = self._validate_language(
@@ -329,6 +345,82 @@ class DiT4DiTVLA(BaseVLA):
                              f'{tuple(actions.shape)}; expected '
                              f'{expected_shape}.')
         return actions
+
+    @torch.no_grad()
+    def compute_training_eval(
+        self,
+        batch: Dict,
+        num_inference_steps: Optional[int] = None,
+        seed: int = 42,
+    ) -> Dict:
+        """Measure masked sampled-action errors using current observations.
+
+        Flow-velocity training loss alone does not measure sampled actions.
+        Targets are used only for scoring, and future images never enter the
+        policy. These are normalized errors on training data, not held-out
+        or simulator success metrics. Preserve RNG, module modes, and the
+        action sampler setting so this diagnostic cannot change training.
+        """
+        steps = (
+            self.vla_head.num_inference_timesteps
+            if num_inference_steps is None else num_inference_steps)
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+            raise ValueError('num_inference_steps must be a positive integer.')
+        device = next(self.parameters()).device
+        inputs = {
+            key: self._require_tensor(key, batch[key]).to(device=device)
+            for key in ('images', 'states', 'lang_tokens', 'lang_masks')
+            if batch.get(key) is not None
+        }
+        images = self._validate_images(inputs.get('images'))
+        target, mask = self._validate_actions(
+            batch.get('actions'), batch.get('action_masks'), images.shape[0])
+        output_dim = (
+            getattr(self.vla_head, 'ori_action_dim', None)
+            or self.vla_head.action_dim)
+        target = target[..., :output_dim].to(
+            device=device, dtype=torch.float32)
+        mask = mask[..., :output_dim].to(device=device, dtype=torch.bool)
+        if not mask.any():
+            raise ValueError('training_eval has no valid action targets.')
+        first_mask = mask[:, 0]
+        if not first_mask.any():
+            raise ValueError('training_eval requires a valid first action.')
+        if not torch.isfinite(target[mask]).all():
+            raise ValueError('training_eval has non-finite action targets.')
+
+        previous_steps = self.vla_head.num_inference_timesteps
+        previous_modes = [(module, module.training)
+                          for module in self.modules()]
+        cuda_devices = [device.index] if device.type == 'cuda' else []
+        try:
+            self.eval()
+            self.vla_head.num_inference_timesteps = steps
+            with torch.random.fork_rng(devices=cuda_devices):
+                torch.random.default_generator.manual_seed(seed)
+                if device.type == 'cuda':
+                    with torch.cuda.device(device):
+                        torch.cuda.manual_seed(seed)
+                prediction = self.predict_action(
+                    images=images[:, :, :1],
+                    states=inputs.get('states'),
+                    lang_tokens=inputs.get('lang_tokens'),
+                    lang_masks=inputs.get('lang_masks'),
+                ).float()
+        finally:
+            self.vla_head.num_inference_timesteps = previous_steps
+            for module, training in previous_modes:
+                module.training = training
+        if not torch.isfinite(prediction).all():
+            raise ValueError('training_eval sampled non-finite actions.')
+        error = prediction - target
+        metrics = {
+            'sampled_action_l1_norm': error.abs()[mask].mean(),
+            'sampled_action_mse_norm': error.square()[mask].mean(),
+            'sampled_first_action_l1_norm': error[:,
+                                                  0].abs()[first_mask].mean(),
+        }
+        return {'metrics': metrics, 'video_frames': None}
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         module_classes = {
