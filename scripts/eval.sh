@@ -27,6 +27,10 @@ NODE_RANK="${RANK:-${MLP_ROLE_INDEX:-0}}"
 MASTER_ADDR="${MASTER_ADDR:-${MLP_WORKER_0_HOST:-localhost}}"
 MASTER_PORT="${MASTER_PORT:-${MLP_WORKER_0_PORT:-29500}}"
 
+# RoboCasa hashes task names while importing its task definitions. Setting
+# this inside Python cannot change that process's hash seed.
+export PYTHONHASHSEED="${PYTHONHASHSEED:-7}"
+
 # torchrun only auto-sets OMP_NUM_THREADS=1 when nproc_per_node > 1. For
 # single-process launches, pin it too; otherwise each worker can spawn
 # ~num_cores CPU threads and oversubscribe the host when many jobs run side by
