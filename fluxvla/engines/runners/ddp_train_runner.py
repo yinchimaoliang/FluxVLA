@@ -12,9 +12,7 @@ from typing import Dict, Optional
 import torch
 import wandb
 from peft import (LoraConfig, PeftModel, cast_mixed_precision_params,
-                  get_peft_model, get_peft_model_state_dict,
-                  set_peft_model_state_dict)
-from peft.utils.save_and_load import load_peft_weights
+                  get_peft_model)
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers.pytorch_utils import Conv1D
 
@@ -100,8 +98,6 @@ class DDPTrainRunner(BaseTrainRunner):
         keep_lora_trainable_params_fp32 (bool): Keep adapters and
             ``modules_to_save`` in FP32 while frozen weights use BF16.
             Opt-in to preserve existing LoRA recipes. Defaults to False.
-        lora_adapter_path (str): Load trained adapters over the configured
-            original base for a new optimizer/schedule. Not exact resume.
     """
 
     def __init__(self,
@@ -134,15 +130,8 @@ class DDPTrainRunner(BaseTrainRunner):
                  lora_before_device_move: bool = True,
                  static_graph: bool = True,
                  keep_lora_trainable_params_fp32: bool = False,
-                 lora_adapter_path: Optional[str] = None,
                  **kwargs) -> None:
 
-        if lora_adapter_path is not None:
-            if resume_from is not None:
-                raise ValueError('lora_adapter_path starts a new optimizer; '
-                                 'do not combine it with resume_from.')
-            if not getattr(cfg.model, 'use_lora', False):
-                raise ValueError('lora_adapter_path requires model.use_lora.')
         if kwargs:
             fields = ', '.join(sorted(kwargs))
             raise TypeError(f'Unexpected runner config field(s): {fields}')
@@ -181,7 +170,6 @@ class DDPTrainRunner(BaseTrainRunner):
         self.keep_lora_trainable_params_fp32 = (
             keep_lora_trainable_params_fp32)
         self.static_graph = static_graph
-        self.lora_adapter_path = lora_adapter_path
         self.distributed_state = overwatch.distributed_state
         self.recent_losses = deque(maxlen=self.grad_accumulation_steps)
 
@@ -194,17 +182,12 @@ class DDPTrainRunner(BaseTrainRunner):
         if overwatch.is_rank_zero():
             overwatch.info('Loading DDP model state')
 
-        model = self.vla.module if isinstance(self.vla, DDP) else self.vla
-        if isinstance(model, PeftModel):
-            if model.state_dict().keys() != checkpoint_model_state.keys():
-                raise ValueError(
-                    'LoRA resume requires the unmerged PEFT model state. '
-                    'A merged export cannot restore adapters. For a new '
-                    'optimizer/schedule, use lora_adapter_path with the '
-                    'original base and matching saved adapter directory.')
-            model.load_state_dict(checkpoint_model_state, strict=True)
+        # Load model state dict (DDP-specific)
+        if isinstance(self.vla, DDP):
+            self.vla.module.load_state_dict(
+                checkpoint_model_state, strict=False)
         else:
-            model.load_state_dict(checkpoint_model_state, strict=False)
+            self.vla.load_state_dict(checkpoint_model_state, strict=False)
 
         if overwatch.is_rank_zero():
             overwatch.info('DDP model state restored from checkpoint')
@@ -252,44 +235,7 @@ class DDPTrainRunner(BaseTrainRunner):
         self.vla = get_peft_model(self.vla, lora_config)
         # Also covers adapters injected after moving the frozen base.
         self._cast_lora_params_for_mixed_precision()
-        adapter_path = getattr(self, 'lora_adapter_path', None)
-        if adapter_path is not None:
-            self._load_lora_adapter(adapter_path, lora_config)
         self.vla.print_trainable_parameters()
-
-    def _load_lora_adapter(self, adapter_path, expected_config):
-        """Restore all adapter/projector tensors without changing the base."""
-        if not Path(adapter_path).is_dir():
-            raise ValueError('lora_adapter_path must be a local adapter '
-                             f'directory: {adapter_path}')
-        saved_config = LoraConfig.from_pretrained(adapter_path)
-        for field in ('r', 'lora_alpha', 'lora_dropout', 'target_modules',
-                      'modules_to_save', 'bias', 'use_rslora', 'use_dora',
-                      'rank_pattern', 'alpha_pattern', 'fan_in_fan_out'):
-            actual = getattr(saved_config, field)
-            expected = getattr(expected_config, field)
-            if field in ('target_modules', 'modules_to_save'):
-                if isinstance(actual, (list, set)):
-                    actual = set(actual)
-                if isinstance(expected, (list, set)):
-                    expected = set(expected)
-            if actual != expected:
-                raise ValueError(f'LoRA adapter {field} differs: '
-                                 f'{actual!r} != {expected!r}')
-        weights = load_peft_weights(adapter_path, device='cpu')
-        expected = get_peft_model_state_dict(self.vla)
-        if weights.keys() != expected.keys():
-            raise ValueError('LoRA adapter keys differ from the configured '
-                             'adapters/modules_to_save.')
-        for key, tensor in weights.items():
-            if tensor.shape != expected[key].shape:
-                raise ValueError(f'LoRA adapter shape differs for {key}.')
-        result = set_peft_model_state_dict(self.vla, weights)
-        if result.unexpected_keys:
-            raise ValueError(f'Unexpected adapter keys: '
-                             f'{result.unexpected_keys}')
-        overwatch.info(f'Loaded LoRA weights from {adapter_path}; '
-                       'optimizer and schedule start fresh.')
 
     def run_setup(self, n_train_examples: int) -> None:
         """Setup DDP-specific model configuration and distributed training."""

@@ -1,5 +1,10 @@
 # DreamZero RoboCasa：100k 之后的改进实验
 
+代码现状：本报告记录的是此前续训实验及其接口。当前已按从头微调的要求移除
+LoRA 续训加载入口和视频/动作总损失系数，仅保留动作时间步加权选项。
+新训练使用 [从预训练底座开始的配置](dreamzero_robocasa_training.md)；
+复现本报告中涉及旧接口的训练脚本需使用历史提交 `8ea605a`。
+
 原训练目录为
 `work_dirs/dreamzero_robocasa_full_data_joint_delta_lora_finetune_0285ca940_bs64_datafix`。
 这里评测的是 RoboCasa GR1 的 24 个任务。100k 完整结果是 144/1200，成功率 12%。
