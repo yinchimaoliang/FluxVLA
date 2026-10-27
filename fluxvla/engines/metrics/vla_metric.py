@@ -281,6 +281,19 @@ class VLAMetric:
         metric_label = ' '.join(key.split('_')).title()
         return f'{prefix}/{metric_label}'
 
+    def _optional_action_metrics(self, prefix: str) -> Dict[str, float]:
+        """Report only action metrics supplied by the policy."""
+        metrics = {}
+        for key, label in (
+            ('l1_loss', 'L1 Loss'),
+            ('action_accuracy', 'Action Token Accuracy'),
+        ):
+            values = list(self.state[key])
+            if values:
+                metrics[f'{prefix}/{label}'] = torch.stack(
+                    values).mean().item()
+        return metrics
+
     def get_status(self, loss: Optional[torch.Tensor] = None) -> str:
         lr = self.state['lr'][-1] if len(self.state['lr']) > 0 else 0
         if loss is None:
@@ -342,15 +355,6 @@ class VLAMetric:
         # Gradient Accumulation Steps --> No Smoothing!
         loss_raw = torch.stack(list(self.state['loss_raw'])).mean().item()
         loss = torch.stack(list(self.state['loss'])).mean().item()
-        if len(self.state['l1_loss']) > 0:
-            l1_loss = torch.stack(list(self.state['l1_loss'])).mean().item()
-        else:
-            l1_loss = 0.0
-        if len(self.state['action_accuracy']) > 0:
-            action_accuracy = torch.stack(list(
-                self.state['action_accuracy'])).mean().item()
-        else:
-            action_accuracy = 0.0
         if len(self.state['step_time']) > 0:
             step_time, lr = np.mean(list(
                 self.state['step_time'])), self.state['lr'][-1]
@@ -361,13 +365,7 @@ class VLAMetric:
         # Get metrics per dataset
         dataset_metrics = {}
         for ds, tracker in self.dataset_trackers.items():
-            dataset_metrics.update({
-                f'{ds}/L1 Loss':
-                torch.stack(list(tracker.state['l1_loss'])).mean().item(),
-                f'{ds}/Action Token Accuracy':
-                torch.stack(list(
-                    tracker.state['action_accuracy'])).mean().item(),
-            })
+            dataset_metrics.update(tracker._optional_action_metrics(ds))
 
         # Fire to Trackers
         prefix = 'VLA Train'
@@ -386,11 +384,10 @@ class VLAMetric:
                 f'{prefix}/Step': self.global_step,
                 f'{prefix}/Epoch': self.epoch,
                 f'{prefix}/Loss': loss,
-                f'{prefix}/L1 Loss': l1_loss,
-                f'{prefix}/Action Token Accuracy': action_accuracy,
                 f'{prefix}/Loss (Raw)': loss_raw,
                 f'{prefix}/Learning Rate': lr_formatted,
                 f'{prefix}/Step Time': step_time,
+                **self._optional_action_metrics(prefix),
                 **dataset_metrics,
                 **extra_scalar_metrics,
             },

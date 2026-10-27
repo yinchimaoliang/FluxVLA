@@ -392,6 +392,16 @@ runner = dict(
     mixed_precision_dtype='bf16',
     # Frozen weights BF16; adapter/projector parameters and AdamW moments FP32.
     keep_lora_trainable_params_fp32=True,
+    # Sample actions from the first observation instead of reporting absent
+    # token accuracy as zero. This samples training data (with augmentation)
+    # using its conditional prompt; it is not held-out or simulator success.
+    evaluator=dict(
+        type='training-eval',
+        eval_every=1000,
+        num_inference_steps=16,
+        seed=42,
+        save_video=False,
+    ),
 )
 
 eval = dict(
