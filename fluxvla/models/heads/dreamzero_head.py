@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import logging
-import math
 import os
 from importlib import import_module
 from typing import Callable, Dict, Optional, TypeAlias
@@ -111,8 +110,6 @@ class DreamZeroHead(nn.Module):
             loading DiT pretrained weights.  ``None`` skips loading.
         official_inference: Use released seed 1140, 8-DiT/16-UniPC schedule,
             BF16 scheduler and image-latent prefill. Default keeps old configs.
-        dynamics_loss_weight / action_loss_weight: Nonnegative coefficients
-            for the two objectives. Reported component losses stay unscaled.
         action_timestep_weighting: ``scheduler`` keeps the source weighting;
             ``uniform`` gives every sampled action timestep unit weight.
     """
@@ -152,20 +149,12 @@ class DreamZeroHead(nn.Module):
         cfg_scale: float = 1.0,
         max_chunk_size: int = -1,
         official_inference: bool = False,
-        dynamics_loss_weight: float = 1.0,
-        action_loss_weight: float = 1.0,
         action_timestep_weighting: str = 'scheduler',
         *args,
         **kwargs,
     ):
         super().__init__()
 
-        loss_weights = (float(dynamics_loss_weight), float(action_loss_weight))
-        if (any(not math.isfinite(w) or w < 0 for w in loss_weights)
-                or sum(loss_weights) == 0):
-            raise ValueError('Loss weights must be finite and nonnegative, '
-                             'with at least one positive weight.')
-        self.dynamics_loss_weight, self.action_loss_weight = loss_weights
         if action_timestep_weighting not in ('scheduler', 'uniform'):
             raise ValueError('action_timestep_weighting must be scheduler '
                              'or uniform.')
@@ -444,9 +433,7 @@ class DreamZeroHead(nn.Module):
         weighted_action_loss = self._reduce_temporal_loss(
             weight_act, valid_action_lengths, sample_weight=sample_weight)
 
-        loss = (
-            self.dynamics_loss_weight * weighted_dynamics_loss +
-            self.action_loss_weight * weighted_action_loss)
+        loss = weighted_dynamics_loss + weighted_action_loss
 
         return dict(
             loss=loss,

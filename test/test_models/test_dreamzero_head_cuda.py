@@ -121,39 +121,21 @@ class TestDreamZeroHeadTiny(unittest.TestCase):
             torch.isnan(actions).any(),
             'Predicted actions should not contain NaN')
 
-    def test_weighted_training_preserves_raw_metrics_and_sampling(self):
+    def test_action_weighting_does_not_change_sampling(self):
         inputs = self._make_inputs(batch_size=1)
-        batch = dict(inputs)
-        batch['latents'] = inputs['latents'].transpose(1, 2)
-        batch['actions'] = torch.randn(
-            1, 10, 32, device='cuda', dtype=torch.bfloat16)
-        batch['action_masks'] = torch.ones_like(batch['actions'])
         with torch.no_grad():
-            torch.manual_seed(42)
-            original = self.head(**batch)
             torch.manual_seed(123)
             original_actions = self.head.predict_action(**inputs)
-            self.head.dynamics_loss_weight = 0.1
-            torch.manual_seed(42)
-            reweighted = self.head(**batch)
+            self.head.action_timestep_weighting = 'uniform'
             torch.manual_seed(123)
             reweighted_actions = self.head.predict_action(**inputs)
-        for key in ('dynamics_loss', 'action_loss'):
-            torch.testing.assert_close(
-                original[key], reweighted[key], rtol=0, atol=0)
         torch.testing.assert_close(
             original_actions, reweighted_actions, rtol=0, atol=0)
-        torch.testing.assert_close(original['loss'] - reweighted['loss'],
-                                   0.9 * original['dynamics_loss'])
 
-    def test_invalid_loss_weights_fail_before_model_construction(self):
+    def test_invalid_action_weighting_fails_before_model_construction(self):
         from fluxvla.models.heads import DreamZeroHead
-        for video, action in [(-1, 1), (float('nan'), 1), (1, float('inf')),
-                              (0, 0)]:
-            with self.subTest(video=video, action=action):
-                with self.assertRaisesRegex(ValueError, 'Loss weights'):
-                    DreamZeroHead(
-                        dynamics_loss_weight=video, action_loss_weight=action)
+        with self.assertRaisesRegex(ValueError, 'action_timestep_weighting'):
+            DreamZeroHead(action_timestep_weighting='invalid')
 
     def test_uniform_action_weight_supervises_full_noise_endpoint(self):
         inputs = self._make_inputs(batch_size=1)
