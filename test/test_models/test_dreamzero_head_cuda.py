@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from unittest.mock import patch
 
 import torch
 
@@ -119,6 +120,65 @@ class TestDreamZeroHeadTiny(unittest.TestCase):
         self.assertFalse(
             torch.isnan(actions).any(),
             'Predicted actions should not contain NaN')
+
+    def test_weighted_training_preserves_raw_metrics_and_sampling(self):
+        inputs = self._make_inputs(batch_size=1)
+        batch = dict(inputs)
+        batch['latents'] = inputs['latents'].transpose(1, 2)
+        batch['actions'] = torch.randn(
+            1, 10, 32, device='cuda', dtype=torch.bfloat16)
+        batch['action_masks'] = torch.ones_like(batch['actions'])
+        with torch.no_grad():
+            torch.manual_seed(42)
+            original = self.head(**batch)
+            torch.manual_seed(123)
+            original_actions = self.head.predict_action(**inputs)
+            self.head.dynamics_loss_weight = 0.1
+            torch.manual_seed(42)
+            reweighted = self.head(**batch)
+            torch.manual_seed(123)
+            reweighted_actions = self.head.predict_action(**inputs)
+        for key in ('dynamics_loss', 'action_loss'):
+            torch.testing.assert_close(
+                original[key], reweighted[key], rtol=0, atol=0)
+        torch.testing.assert_close(
+            original_actions, reweighted_actions, rtol=0, atol=0)
+        torch.testing.assert_close(original['loss'] - reweighted['loss'],
+                                   0.9 * original['dynamics_loss'])
+
+    def test_invalid_loss_weights_fail_before_model_construction(self):
+        from fluxvla.models.heads import DreamZeroHead
+        for video, action in [(-1, 1), (float('nan'), 1), (1, float('inf')),
+                              (0, 0)]:
+            with self.subTest(video=video, action=action):
+                with self.assertRaisesRegex(ValueError, 'Loss weights'):
+                    DreamZeroHead(
+                        dynamics_loss_weight=video, action_loss_weight=action)
+
+    def test_uniform_action_weight_supervises_full_noise_endpoint(self):
+        inputs = self._make_inputs(batch_size=1)
+        inputs['latents'] = inputs['latents'].transpose(1, 2)
+        inputs['actions'] = torch.randn(
+            1, 10, 32, device='cuda', dtype=torch.bfloat16)
+        inputs['action_masks'] = torch.ones_like(inputs['actions'])
+        # Index zero is sigma=1: source scheduler weighting is exactly zero.
+        with patch(
+                'torch.randint',
+                return_value=torch.zeros(1, 3, dtype=torch.long)):
+            torch.manual_seed(51)
+            source = self.head(**inputs)
+            self.assertEqual(source['action_loss'].item(), 0)
+            self.head.action_timestep_weighting = 'uniform'
+            torch.manual_seed(51)
+            uniform = self.head(**inputs)
+        self.assertGreater(uniform['action_loss'].item(), 0)
+        torch.testing.assert_close(
+            uniform['dynamics_loss'], source['dynamics_loss'], rtol=0, atol=0)
+        uniform['loss'].backward()
+        grads = [p.grad for p in self.head.model.action_decoder.parameters()]
+        self.assertTrue(
+            all(g is not None and torch.isfinite(g).all() for g in grads))
+        self.assertTrue(any(g.abs().sum() > 0 for g in grads))
 
     def test_predict_action_deterministic_with_seed(self):
         """Same seed should give same output."""

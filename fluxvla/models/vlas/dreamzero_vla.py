@@ -23,6 +23,57 @@ from .base_vla import BaseVLA
 overwatch = initialize_overwatch(__name__)
 
 
+def _command_error_metrics(prediction, target, valid, stats, groups, counts):
+    """Measure clipped min/max commands using each sample's model-order stats.
+
+    Adding the same reference state to relative predictions and labels
+    cancels in their difference. Constant coordinates send a fixed command
+    and contribute zero error, regardless of the normalized prediction.
+    """
+    batch_size, _, action_dim = target.shape
+    if not isinstance(stats, (list, tuple)) or len(stats) != batch_size:
+        raise ValueError('Command metrics require per-sample action stats.')
+    try:
+        low, high = [
+            torch.as_tensor([s['action'][key][:action_dim] for s in stats],
+                            dtype=torch.float32,
+                            device=target.device) for key in ('min', 'max')
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError('Command metrics require action min/max stats in '
+                         'model order.') from exc
+    if (low.shape != (batch_size, action_dim) or high.shape != low.shape
+            or not torch.isfinite(low).all() or not torch.isfinite(high).all()
+            or (high < low).any()):
+        raise ValueError('Command metrics require finite, ordered min/max '
+                         'stats for every action dimension.')
+    span = (high - low).unsqueeze(1)
+    normalized_error = prediction.clamp(-1, 1) - target
+    command_error = torch.where(span > 0, normalized_error * span / 2, 0)
+    metrics = {}
+    for group, indices in groups.items():
+        if (not indices or len(set(indices)) != len(indices)
+                or any(not isinstance(i, int) or not 0 <= i < action_dim
+                       for i in indices)):
+            raise ValueError(f'Invalid training eval action group: {group}')
+        for count in counts:
+            mask = valid[:, :count, indices]
+            selected = command_error[:, :count, indices][mask]
+            active_mask = mask & (span[..., indices] > 0)
+            active = normalized_error[:, :count, indices][active_mask]
+            if not selected.numel() or not active.numel():
+                raise ValueError(f'Training eval group {group} has no valid '
+                                 'nonconstant action coordinates.')
+            for units, values in [('command', selected),
+                                  ('active_normalized', active)]:
+                prefix = f'sampled_{group}_{units}'
+                metrics[f'{prefix}_mae_first{count}'] = (
+                    values.abs().mean().item())
+                metrics[f'{prefix}_rmse_first{count}'] = (
+                    values.square().mean().sqrt().item())
+    return metrics
+
+
 @VLAS.register_module()
 class DreamZeroVLA(BaseVLA):
     """DreamZero World-Action Model.
@@ -68,6 +119,7 @@ class DreamZeroVLA(BaseVLA):
         freeze_projector: bool = True,
         use_cache: bool = True,
         pretrained_skip_prefixes: Optional[List[str]] = None,
+        training_eval_action_groups: Optional[Dict[str, List[int]]] = None,
         *args,
         **kwargs,
     ) -> None:
@@ -87,6 +139,8 @@ class DreamZeroVLA(BaseVLA):
         self.use_cache = use_cache
         self.vla_head.use_cache = use_cache
         self.all_module_keys = ['vlm_backbone', 'vla_head']
+        # Opt in only for recipes using clipped min/max action normalization.
+        self.training_eval_action_groups = training_eval_action_groups or {}
 
     def _prepare_states(self, states: torch.Tensor,
                         num_tokens: int) -> torch.Tensor:
@@ -260,6 +314,102 @@ class DreamZeroVLA(BaseVLA):
     # ------------------------------------------------------------------
     # Inference
     # ------------------------------------------------------------------
+    @torch.no_grad()
+    def compute_training_eval(self,
+                              batch: Dict,
+                              num_inference_steps: int = 16,
+                              seed: int = 42,
+                              **kwargs) -> Dict:
+        """Measure sampled actions, without exposing future demonstrations.
+
+        Only the first observed image/state and supplied prompts condition
+        sampling. Targets are used afterward to measure normalized MAE/RMSE
+        over the first eight actions and the full first action block. Padded
+        dimensions/timesteps are excluded. Ordinary training batches contain
+        one prompt, so their diagnostic uses conditional-only sampling.
+        If training_eval_action_groups is configured, also report per-group
+        command MAE/RMSE after clipping and min/max denormalization, plus
+        clipped normalized errors excluding constant coordinates. This needs
+        per-sample ``stats`` metadata in the model's action dimension order.
+
+        These are imitation errors on the evaluator's sampled data, not
+        simulator success or held-out metrics unless a separate eval dataset
+        is configured. Official inference retains its fixed noise seed 1140.
+        """
+        head = self.vla_head
+        if num_inference_steps <= 0 or (head.official_inference
+                                        and num_inference_steps != 16):
+            raise ValueError('Official DreamZero inference requires 16 '
+                             'scheduler steps; other modes require > 0')
+
+        parameter = next(self.vlm_backbone.parameters())
+        device, dtype = parameter.device, parameter.dtype
+        images = batch['images'][:, :, :1].to(device=device, dtype=dtype)
+        states = batch['states']
+        if states.ndim == 3:
+            states = states[:, :1]
+        states = states.to(device=device, dtype=dtype)
+        tokens = batch['lang_tokens'].to(device=device)
+        masks = batch['lang_masks'].to(device=device)
+        embodiments = batch.get('embodiment_ids')
+        if embodiments is not None:
+            embodiments = embodiments.to(device=device)
+
+        saved_cache = {
+            name: value
+            for name, value in vars(head).items()
+            if name.startswith('inference_') or name == 'current_start_frame'
+        }
+        saved_steps = head.num_inference_steps
+        saved_modes = [(module, module.training) for module in self.modules()]
+        rng_devices = [device.index] if device.type == 'cuda' else []
+        try:
+            self.eval()
+            head.num_inference_steps = num_inference_steps
+            with torch.random.fork_rng(devices=rng_devices):
+                torch.random.default_generator.manual_seed(seed)
+                if device.type == 'cuda':
+                    torch.cuda.default_generators[device.index].manual_seed(
+                        seed)
+                prediction = self._predict_from_observed_video(
+                    images, tokens, masks, states, embodiments)
+        finally:
+            head.num_inference_steps = saved_steps
+            for name, value in saved_cache.items():
+                setattr(head, name, value)
+            for module, training in saved_modes:
+                module.training = training
+
+        horizon = head.num_action_per_block
+        action_dim = head.action_dim
+        target = batch['actions'][:, :horizon, :action_dim].to(device).float()
+        prediction = prediction[:, :horizon, :action_dim].float()
+        if prediction.shape != target.shape:
+            raise ValueError('Training eval needs one complete action block '
+                             'with the same batch size as the prediction')
+        valid = batch['action_masks'][:, :horizon].to(device).bool()
+        if valid.ndim == 2:
+            valid = valid.unsqueeze(-1).expand_as(target)
+        else:
+            valid = valid[..., :action_dim]
+        error = prediction - target
+        metrics = {}
+        counts = sorted({min(8, horizon), horizon})
+        for count in counts:
+            selected = error[:, :count][valid[:, :count]]
+            if selected.numel() == 0:
+                raise ValueError('Training eval action block is fully masked')
+            metrics[f'sampled_action_mae_first{count}'] = (
+                selected.abs().mean().item())
+            metrics[f'sampled_action_rmse_first{count}'] = (
+                selected.square().mean().sqrt().item())
+        groups = getattr(self, 'training_eval_action_groups', {})
+        if groups:
+            metrics.update(
+                _command_error_metrics(prediction, target, valid,
+                                       batch.get('stats'), groups, counts))
+        return dict(metrics=metrics, video_frames=None)
+
     @torch.no_grad()
     def _predict_from_observed_video(self, video, lang_tokens, lang_masks,
                                      states, embodiment_ids):
