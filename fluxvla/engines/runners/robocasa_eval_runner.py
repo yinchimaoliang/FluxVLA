@@ -15,9 +15,12 @@
 
 import copy
 import csv
+import hashlib
 import json
 import os
 import random
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -128,6 +131,9 @@ class RobocasaEvalRunner(BaseEvalRunner):
         self.set_common_eval_attrs(cfg, seed, ckpt_path, model_family,
                                    mixed_precision_dtype,
                                    enable_mixed_precision_training)
+        self.requested_ckpt_path = ckpt_path
+        ckpt_path = self._pin_checkpoint(ckpt_path)
+        self.ckpt_path = ckpt_path
         if (model_build_device is not None
                 and str(model_build_device).startswith('cuda')
                 and torch.cuda.is_available()):
@@ -443,6 +449,83 @@ class RobocasaEvalRunner(BaseEvalRunner):
     def _action_seed(self, local_id: int, step: int) -> int:
         return self._normalize_seed(self.seed + 1_000_003 * (local_id + 1) +
                                     step)
+
+    @staticmethod
+    def _broadcast_from_rank_zero(value):
+        if dist.is_available() and dist.is_initialized():
+            values = [value if dist.get_rank() == 0 else None]
+            device = None
+            if dist.get_backend() == 'nccl':
+                device = torch.device('cuda', overwatch.local_rank())
+            dist.broadcast_object_list(values, src=0, device=device)
+            return values[0]
+        return value
+
+    @classmethod
+    def _pin_checkpoint(cls, ckpt_path):
+        """Resolve a changing latest link once, before any model is loaded."""
+        distributed = dist.is_available() and dist.is_initialized()
+        result = None
+        if not distributed or dist.get_rank() == 0:
+            try:
+                resolved = (
+                    str(Path(ckpt_path).expanduser().resolve(
+                        strict=True)) if ckpt_path is not None else None)
+                result = dict(path=resolved, error=None)
+            except OSError as error:
+                result = dict(path=None, error=str(error))
+        result = cls._broadcast_from_rank_zero(result)
+        if result['error'] is not None:
+            raise FileNotFoundError(result['error'])
+        return result['path']
+
+    @staticmethod
+    def _python_hash_info(validate=True):
+        """Check effective hashing, not a variable assigned after startup."""
+        probe = 'PosttrainPnPNovelFromCuttingboardToBasketSplitA'
+        seed = os.environ.get('PYTHONHASHSEED')
+        info = dict(
+            seed=seed, probe=hash(probe), python=sys.version.split()[0])
+        if not validate:
+            return info
+        valid_seed = (
+            seed is not None and seed.isdecimal()
+            and 0 <= int(seed) <= 2**32 - 1)
+        info['expected_probe'] = None
+        if valid_seed:
+            info['expected_probe'] = int(
+                subprocess.check_output(
+                    [sys.executable, '-c', f'print(hash({probe!r}))'],
+                    text=True).strip())
+        fingerprints = [info]
+        if dist.is_available() and dist.is_initialized():
+            fingerprints = [None] * dist.get_world_size()
+            dist.all_gather_object(fingerprints, info)
+        if (any(item['probe'] != item['expected_probe']
+                for item in fingerprints)
+                or len({item['probe']
+                        for item in fingerprints}) != 1):
+            raise RuntimeError(
+                'RoboCasa needs the same effective Python hash seed on '
+                'every rank. Set PYTHONHASHSEED=7 before starting Python '
+                '(or use scripts/eval.sh). Setting it inside Python is '
+                'too late and changes scenes between evaluations.')
+        return info
+
+    @staticmethod
+    def _observation_fingerprint(obs):
+        """Record the actual initial policy observation for paired evals."""
+        image_key = 'video.ego_view_bg_crop_pad_res256_freq20'
+        frame = np.ascontiguousarray(obs[image_key])
+        state = hashlib.sha256()
+        for key in sorted(k for k in obs if k.startswith('state.')):
+            value = np.ascontiguousarray(obs[key])
+            state.update(key.encode())
+            state.update(str((value.shape, value.dtype)).encode())
+            state.update(value.tobytes())
+        return dict(
+            image_sha256=hashlib.sha256(frame.tobytes()).hexdigest(),
+            state_sha256=state.hexdigest())
 
     @staticmethod
     def _seed_python_numpy_torch(seed: int) -> None:
@@ -782,6 +865,10 @@ class RobocasaEvalRunner(BaseEvalRunner):
                     run_id,
                     'ckpt':
                     self.ckpt_path,
+                    'requested_ckpt':
+                    getattr(self, 'requested_ckpt_path', self.ckpt_path),
+                    'python_hash':
+                    getattr(self, 'python_hash_info', None),
                     'config':
                     cfg_filename or '',
                     'model_family':
@@ -809,6 +896,9 @@ class RobocasaEvalRunner(BaseEvalRunner):
     def run(self):
         """Run the RoboCasa evaluation loop."""
         import gymnasium as gym
+
+        self.python_hash_info = self._python_hash_info(
+            validate=self.deterministic_env)
 
         from fluxvla.engines.utils.eval_utils import check_robosuite_runtime
 
@@ -848,7 +938,8 @@ class RobocasaEvalRunner(BaseEvalRunner):
         local_episodes = rank_schedules[rank]
         num_local_episodes = max(len(schedule) for schedule in rank_schedules)
 
-        data_time = time.strftime('%Y_%m_%d-%H_%M_%S')
+        data_time = self._broadcast_from_rank_zero(
+            time.strftime('%Y_%m_%d-%H_%M_%S'))
         run_id = self._build_run_id(
             self.model_family, data_time, suffix=self.run_id_suffix)
         output_root = self.output_dir
@@ -865,11 +956,14 @@ class RobocasaEvalRunner(BaseEvalRunner):
         log_file.write(f'Rank {rank}/{world_size}, seed={self.seed}\n')
         log_file.write('PYTHONHASHSEED={}\n'.format(
             os.environ.get('PYTHONHASHSEED')))
+        log_file.write(f'Effective Python hash: {self.python_hash_info}\n')
+        log_file.write(f'Pinned checkpoint: {self.ckpt_path}\n')
         log_file.write(f'Deterministic env: {self.deterministic_env}, '
                        f'deterministic action sampling: '
                        f'{self.deterministic_action_sampling}\n')
         log_file.write(f'Task ids: {task_ids}\n')
         log_file.write(f'Eval shard strategy: {self.eval_shard_strategy}\n')
+        episode_filepath = Path(self.run_dir) / f'episodes_rank{rank}.jsonl'
 
         reduction_device = (
             torch.device('cuda', torch.cuda.current_device())
@@ -932,6 +1026,14 @@ class RobocasaEvalRunner(BaseEvalRunner):
                 task_desc = obs.get('annotation.human.coarse_action', '')
                 overwatch.info(f'Task desc: {task_desc}')
                 log_file.write(f'Task desc: {task_desc}\n')
+                episode_record = dict(
+                    task_id=task_id,
+                    trial_id=trial_id,
+                    seed=episode_seed,
+                    task_description=task_desc,
+                    initial_observation=self._observation_fingerprint(obs))
+                log_file.write('Initial observation: {}\n'.format(
+                    episode_record['initial_observation']))
 
                 # Evaluation loop.
                 success = False
@@ -1097,6 +1199,9 @@ class RobocasaEvalRunner(BaseEvalRunner):
                 result_str = 'SUCCESS' if success else 'FAIL'
                 overwatch.info(f'  Result: {result_str} (steps={t})')
                 log_file.write(f'  Result: {result_str} (steps={t})\n')
+                episode_record.update(success=success, steps=t)
+                with open(episode_filepath, 'a', encoding='utf-8') as stream:
+                    stream.write(json.dumps(episode_record) + '\n')
 
                 # Save rollout video.
                 if self.save_video and replay_images:
