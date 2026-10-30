@@ -128,8 +128,9 @@ class DDPTrainRunner(BaseTrainRunner):
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
                  lora_before_device_move: bool = True,
-                 static_graph: bool = True,
+                 static_graph: Optional[bool] = None,
                  keep_lora_trainable_params_fp32: bool = False,
+                 train_task: str = 'vla',
                  **kwargs) -> None:
 
         if kwargs:
@@ -161,7 +162,8 @@ class DDPTrainRunner(BaseTrainRunner):
             seed=seed,
             evaluator=evaluator,
             tokenizer=tokenizer,
-            resume_from=resume_from)
+            resume_from=resume_from,
+            train_task=train_task)
 
         self.cfg = cfg
         self.args = args
@@ -169,7 +171,11 @@ class DDPTrainRunner(BaseTrainRunner):
         self.lora_before_device_move = lora_before_device_move
         self.keep_lora_trainable_params_fp32 = (
             keep_lora_trainable_params_fp32)
-        self.static_graph = static_graph
+        if train_task == 'vlm' and static_graph is True:
+            raise ValueError('VLM batches can use different visual modules; '
+                             'set static_graph=False.')
+        self.static_graph = (
+            train_task == 'vla' if static_graph is None else static_graph)
         self.distributed_state = overwatch.distributed_state
         self.recent_losses = deque(maxlen=self.grad_accumulation_steps)
 
@@ -233,6 +239,7 @@ class DDPTrainRunner(BaseTrainRunner):
                                       'gaussian'),
         )
         self.vla = get_peft_model(self.vla, lora_config)
+        self._prepare_training_task()
         # Also covers adapters injected after moving the frozen base.
         self._cast_lora_params_for_mixed_precision()
         self.vla.print_trainable_parameters()
@@ -245,6 +252,8 @@ class DDPTrainRunner(BaseTrainRunner):
 
         self.vla.freeze_backbones()
         self.vla.from_pretrained()
+        # LoRA can introduce trainable parameters into a frozen backbone.
+        self.vla.prepare_training_task(self.train_task)
 
         use_lora = self._model_uses_lora()
         if use_lora and self.lora_before_device_move:
@@ -261,11 +270,22 @@ class DDPTrainRunner(BaseTrainRunner):
             if use_lora:
                 self._apply_lora()
 
+            self._prepare_training_task()
+
             # Setup optimizer and scheduler using base class method.
             self._setup_optimizer_and_scheduler(n_train_examples)
 
+        # Native VLMs own both vision and language checkpointing. Avoid
+        # wrapping their decoder layers again with generic checkpoints.
+        native_checkpointing = (
+            self.train_task == 'vlm' and self.vla.vlm_backbone is not None
+            and callable(
+                getattr(self.vla.vlm_backbone, 'enable_gradient_checkpointing',
+                        None)))
+        if self.enable_gradient_checkpointing and native_checkpointing:
+            self.vla.vlm_backbone.enable_gradient_checkpointing()
         # Apply Gradient Checkpointing (after moving to device)
-        if self.enable_gradient_checkpointing:
+        if self.enable_gradient_checkpointing and not native_checkpointing:
             from functools import partial
 
             import torch.nn as nn
@@ -941,6 +961,10 @@ class DDPTrainRunner(BaseTrainRunner):
 
     def _custom_training_step(self, batch, output, loss):
         """Custom training step for DDP-specific logging and metrics."""
+        if self.train_task == 'vlm':
+            # BaseTrainRunner already logs the global token-weighted result.
+            # Do not replace it with an average of optimizer-step means.
+            return None
         # Add loss to recent losses for smoothing
         self.recent_losses.append(loss.item())
 

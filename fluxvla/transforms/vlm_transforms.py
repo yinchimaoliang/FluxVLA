@@ -285,6 +285,16 @@ class ProcessVLMSFTInputs:
         state.update(_processor=None, _processor_pid=None)
         return state
 
+    def save_pretrained(self, output_dir):
+        """Persist the exact processor settings alongside training weights."""
+        processor = get_processor_for_vlm(
+            self.processor_type,
+            self.processor_path,
+            image_max_pixels=self.image_max_pixels,
+            video_max_pixels=self.video_max_pixels,
+            **self.processor_kwargs)
+        processor.save_pretrained(output_dir)
+
     def __call__(self, data):
         messages = data.get('messages')
         if (not isinstance(messages, list) or not messages or not all(

@@ -226,6 +226,7 @@ class VLAMetric:
         self.scalar_window_size = (
             self.window_size * self.grad_accumulation_steps)
         self.run_id, self.run_dir, self.hparams = run_id, run_dir, hparams
+        self.train_task = hparams.get('runner', {}).get('train_task', 'vla')
         if self.run_dir:
             os.makedirs(self.run_dir, exist_ok=True)
         # Initialize Trackers
@@ -235,7 +236,7 @@ class VLAMetric:
                 tracker = JSONLinesTracker(run_id, run_dir, hparams)
             elif tracker_type == 'wandb':
                 tracker = WeightsBiasesTracker(
-                    run_id, run_dir, hparams, group='vla-train')
+                    run_id, run_dir, hparams, group=f'{self.train_task}-train')
             elif tracker_type == 'tensorboard':
                 tracker = TensorBoardTracker(run_id, run_dir, hparams)
             else:
@@ -370,7 +371,7 @@ class VLAMetric:
             })
 
         # Fire to Trackers
-        prefix = 'VLA Train'
+        prefix = 'VLM Train' if self.train_task == 'vlm' else 'VLA Train'
         # Format lr to ensure at least 6 decimal places
         lr_formatted = f'{lr:.7f}'
         extra_scalar_metrics = {}
@@ -380,14 +381,19 @@ class VLAMetric:
                 metric_name = self._format_scalar_metric_name(prefix, key)
                 extra_scalar_metrics[metric_name] = torch.stack(
                     values).mean().item()
+        action_metrics = {}
+        if self.train_task == 'vla':
+            action_metrics = {
+                f'{prefix}/L1 Loss': l1_loss,
+                f'{prefix}/Action Token Accuracy': action_accuracy,
+            }
         self.log(
             self.global_step,
             metrics={
                 f'{prefix}/Step': self.global_step,
                 f'{prefix}/Epoch': self.epoch,
                 f'{prefix}/Loss': loss,
-                f'{prefix}/L1 Loss': l1_loss,
-                f'{prefix}/Action Token Accuracy': action_accuracy,
+                **action_metrics,
                 f'{prefix}/Loss (Raw)': loss_raw,
                 f'{prefix}/Learning Rate': lr_formatted,
                 f'{prefix}/Step Time': step_time,

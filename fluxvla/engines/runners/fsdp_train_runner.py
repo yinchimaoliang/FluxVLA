@@ -108,6 +108,7 @@ class FSDPTrainRunner(BaseTrainRunner):
                  change_key_name: bool = False,
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
+                 train_task: str = 'vla',
                  args=None,
                  *_unused_args,
                  **kwargs) -> None:
@@ -140,7 +141,8 @@ class FSDPTrainRunner(BaseTrainRunner):
             seed=seed,
             evaluator=evaluator,
             tokenizer=tokenizer,
-            resume_from=resume_from)
+            resume_from=resume_from,
+            train_task=train_task)
         self.cfg = cfg
         self.args = args
         self.max_grad_norm = max_grad_norm
@@ -426,6 +428,7 @@ class FSDPTrainRunner(BaseTrainRunner):
         torch.cuda.empty_cache()
 
         self.vla.freeze_backbones()
+        self._prepare_training_task()
         fsdp_ignored_modules = self._resolve_fsdp_ignored_modules()
 
         is_no_shard = (
@@ -442,7 +445,9 @@ class FSDPTrainRunner(BaseTrainRunner):
                     'execution-block FSDP wrapping policy.')
             vla_fsdp_wrapping_policy = policy_getter()
         else:
-            vla_fsdp_wrapping_policy = self.vla.get_fsdp_wrapping_policy()
+            vla_fsdp_wrapping_policy = (
+                self.vla.get_vlm_fsdp_wrapping_policy() if self.train_task
+                == 'vlm' else self.vla.get_fsdp_wrapping_policy())
 
         # Assemble the Default FSDP Mixed Precision Policy
         if self.enable_mixed_precision_training and self.mixed_precision_dtype == torch.bfloat16:  # noqa: E501

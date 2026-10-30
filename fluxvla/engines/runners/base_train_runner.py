@@ -103,11 +103,16 @@ class BaseTrainRunner(ABC):
                  seed: Optional[int] = None,
                  evaluator: Optional[Dict] = None,
                  tokenizer: Optional[Dict] = None,
-                 resume_from: Optional[str] = None):
+                 resume_from: Optional[str] = None,
+                 train_task: str = 'vla'):
         from ..utils.builder import (build_collator_from_cfg,
                                      build_metric_from_cfg, build_vla_from_cfg)
 
         configure_deterministic_training(deterministic_algorithms)
+        if train_task not in ('vla', 'vlm'):
+            raise ValueError('runner.train_task must be "vla" or "vlm".')
+        self.train_task = train_task
+        self._vlm_step_totals = None
 
         per_device_batch_size = cfg.train_dataloader.per_device_batch_size
         grad_accumulation_steps = int(grad_accumulation_steps)
@@ -132,6 +137,7 @@ class BaseTrainRunner(ABC):
         self.training_mode = 'step_based' if max_steps is not None else 'epoch_based'  # noqa: E501
 
         self.vla = build_vla_from_cfg(cfg.model)
+        self.vla.validate_training_task(train_task)
         self.all_module_keys = self.vla.all_module_keys
         if self.vla.llm_backbone is not None:
             self.llm_transformer_layer_cls = self.vla.llm_backbone.transformer_layer_cls  # noqa: E501
@@ -210,6 +216,64 @@ class BaseTrainRunner(ABC):
     def _unwrap_vla(self) -> torch.nn.Module:
         """Return the model underneath a distributed wrapper."""
         return self.vla.module if hasattr(self.vla, 'module') else self.vla
+
+    def _prepare_training_task(self):
+        self.vla.prepare_training_task(self.train_task)
+        if not any(p.requires_grad for p in self.vla.parameters()):
+            raise ValueError(f'No trainable parameters for {self.train_task}; '
+                             'check the backbone freezing configuration.')
+
+    def _finish_vlm_accumulation(self, output):
+        """Normalize averaged distributed gradients by global target count.
+
+        Each backward uses a token *sum*. DDP/FSDP average gradients across
+        ranks; undo that average and divide once by the total target count
+        across the accumulation window, before clipping or optimizer.step.
+        """
+        totals = self._vlm_step_totals
+        world_size = 1
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(totals)
+            world_size = dist.get_world_size()
+        self._vlm_step_totals = None
+        if totals[1].item() == 0:
+            self.optimizer.zero_grad()
+            raise ValueError('VLM optimizer step has no supervised tokens.')
+        scale = world_size / totals[1]
+        for parameter in self.vla.parameters():
+            if parameter.grad is not None:
+                parameter.grad.mul_(scale.to(parameter.grad.dtype))
+        loss = (totals[0] / totals[1]).to(output['loss'].dtype)
+        self.metric.commit(
+            loss=loss,
+            vlm_loss=loss,
+            token_accuracy=(totals[2] / totals[1]).float(),
+            supervised_tokens=totals[1].float())
+        return loss
+
+    def _save_vlm_assets(self, dataset):
+        if self.train_task != 'vlm' or not overwatch.is_rank_zero():
+            return
+        asset_dir = Path(self.metric.run_dir) / 'vlm_assets'
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        model = self._unwrap_vla()
+        backbone = model.vlm_backbone
+        config = (
+            backbone.vlm.config
+            if backbone is not None else model.llm_backbone.llm.config)
+        config.save_pretrained(asset_dir)
+        native = (
+            backbone.vlm if backbone is not None else model.llm_backbone.llm)
+        if getattr(native, 'generation_config', None) is not None:
+            native.generation_config.save_pretrained(asset_dir)
+        for transform in getattr(dataset, 'transforms', []):
+            save_assets = getattr(transform, 'save_pretrained', None)
+            if callable(save_assets):
+                save_assets(asset_dir)
+        if self.tokenizer is not None:
+            tokenizer = getattr(self.tokenizer, 'tokenizer', self.tokenizer)
+            if callable(getattr(tokenizer, 'save_pretrained', None)):
+                tokenizer.save_pretrained(asset_dir)
 
     def can_run_training_eval(self) -> bool:
         """Return whether the underlying VLA exposes a training-eval hook."""
@@ -690,6 +754,7 @@ class BaseTrainRunner(ABC):
 
     def run(self, vla_dataset, eval_dataset=None) -> None:
         """Train the VLA model."""
+        self._save_vlm_assets(vla_dataset)
         self._configure_dataset_sharding(vla_dataset)
         training_eval_dataset = (
             vla_dataset if eval_dataset is None else eval_dataset)
@@ -808,7 +873,9 @@ class BaseTrainRunner(ABC):
             with self._grad_sync_context(should_sync=should_step):
                 loss = self._training_step(batch, should_step=should_step)
             losses.append(loss.detach())
-        mean_loss = torch.stack(losses).mean()
+        mean_loss = (
+            losses[-1]
+            if self.train_task == 'vlm' else torch.stack(losses).mean())
         return float(mean_loss.item()), dataloader_iter
 
     def _grad_sync_context(self, should_sync: bool):
@@ -1040,12 +1107,27 @@ class BaseTrainRunner(ABC):
                 'cuda',
                 dtype=self.mixed_precision_dtype,
                 enabled=self.enable_mixed_precision_training):
-            output: CausalLMOutputWithPast = self.vla(**batch)
+            output: CausalLMOutputWithPast = (
+                self.vla(task='vlm', **batch)
+                if self.train_task == 'vlm' else self.vla(**batch))
             loss = output['loss']
             loss_metrics = self._collect_output_loss_metrics(output)
 
-        self.metric.commit(loss=loss, **loss_metrics)
-        (loss / self.grad_accumulation_steps).backward()
+        if self.train_task == 'vlm':
+            totals = torch.stack([
+                output[key].detach().double()
+                for key in ('loss_sum', 'num_tokens', 'num_correct')
+            ])
+            if self._vlm_step_totals is None:
+                self._vlm_step_totals = totals
+            else:
+                self._vlm_step_totals += totals
+            output['loss_sum'].backward()
+            if should_step:
+                loss = self._finish_vlm_accumulation(output)
+        else:
+            self.metric.commit(loss=loss, **loss_metrics)
+            (loss / self.grad_accumulation_steps).backward()
 
         # Commit per-dataset metrics
         if overwatch.is_rank_zero() and all(k in output for k in [
