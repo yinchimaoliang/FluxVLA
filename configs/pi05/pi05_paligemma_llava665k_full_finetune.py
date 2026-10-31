@@ -165,7 +165,7 @@ train_dataloader = dict(
     per_device_batch_size=1,
     per_device_num_workers=0)
 
-# scripts/train.py --eval-after-train and pi05_eval.py share this benchmark.
+# Standalone TextVQA evaluation and --eval-after-train share this benchmark.
 eval = dict(
     type='TextVQAEvalRunner',
     checkpoint_dir='work_dirs/pi05_vlm_sft/checkpoints',
