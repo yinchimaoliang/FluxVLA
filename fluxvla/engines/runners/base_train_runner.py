@@ -258,12 +258,10 @@ class BaseTrainRunner(ABC):
         asset_dir.mkdir(parents=True, exist_ok=True)
         model = self._unwrap_vla()
         backbone = model.vlm_backbone
-        config = (
-            backbone.vlm.config
-            if backbone is not None else model.llm_backbone.llm.config)
-        config.save_pretrained(asset_dir)
         native = (
-            backbone.vlm if backbone is not None else model.llm_backbone.llm)
+            backbone.vlm if backbone is not None else getattr(
+                model.llm_backbone, 'llm', model.llm_backbone))
+        native.config.save_pretrained(asset_dir)
         if getattr(native, 'generation_config', None) is not None:
             native.generation_config.save_pretrained(asset_dir)
         for transform in getattr(dataset, 'transforms', []):

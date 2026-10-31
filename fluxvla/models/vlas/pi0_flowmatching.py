@@ -123,6 +123,7 @@ class PI0FlowMatching(BaseVLA):
                  openpi_fp32_flow: bool = False,
                  rtc_training_config: Optional[Dict] = None,
                  preserve_fp32_residuals: bool = False,
+                 pretrained_skip_prefixes: Optional[List[str]] = None,
                  **kwargs):
         super(PI0FlowMatching, self).__init__(
             vision_backbone=vision_backbone,
@@ -131,6 +132,7 @@ class PI0FlowMatching(BaseVLA):
             projector=projector,
             vla_head=vla_head,
             pretrained_name_or_path=pretrained_name_or_path,
+            pretrained_skip_prefixes=pretrained_skip_prefixes,
             enable_mixed_precision_training=enable_mixed_precision_training,
             freeze_vision_backbone=freeze_vision_backbone,
             freeze_llm_backbone=freeze_llm_backbone,
