@@ -39,6 +39,9 @@ class VLMEvaluator(BaseEvaluator):
             raise ValueError('VLMEvaluator requires train_task="vlm".')
         if len(dataset) == 0:
             raise ValueError('VLM validation dataset is empty.')
+        if getattr(dataset, 'max_retry_times', 0):
+            raise ValueError('VLM validation requires max_retry_times=0; '
+                             'random replacement changes the evaluated set.')
         distributed = dist.is_available() and dist.is_initialized()
         rank = dist.get_rank() if distributed else 0
         world_size = dist.get_world_size() if distributed else 1
@@ -65,8 +68,10 @@ class VLMEvaluator(BaseEvaluator):
                     if runner.enable_mixed_precision_training
                     and not runner.keep_params_fp32 else None)
                 batch = runner._prepare_batch(batch, runner.device_id, dtype)
+                device_type = ('cuda' if isinstance(runner.device_id, int) else
+                               torch.device(runner.device_id).type)
                 with torch.autocast(
-                        'cuda',
+                        device_type,
                         dtype=runner.mixed_precision_dtype,
                         enabled=runner.enable_mixed_precision_training):
                     output = runner.vla(task='vlm', **batch)

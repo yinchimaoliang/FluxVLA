@@ -109,6 +109,39 @@ class ProcessPi05VLMSFTInputs:
         tokens, labels = tokens[:self.max_length], labels[:self.max_length]
         if not any(label != -100 for label in labels[1:]):
             raise ValueError('No assistant targets remain after truncation.')
+        return dict(
+            data,
+            input_ids=torch.tensor(tokens, dtype=torch.long),
+            labels=torch.tensor(labels, dtype=torch.long),
+            attention_mask=torch.ones(len(tokens), dtype=torch.bool),
+            images=self._load_images(image_paths))
+
+    def encode_prompt(self, question, image_paths=()):
+        """Encode inference input without accepting or returning answers."""
+        tokenizer = self._get_tokenizer()
+        tokens = ([tokenizer.bos_id()] + tokenizer.encode(question) +
+                  tokenizer.encode('\n'))
+        if len(tokens) > self.max_length:
+            raise ValueError('Pi05 generation prompt exceeds max_length.')
+        inputs = dict(
+            input_ids=torch.tensor(tokens, dtype=torch.long),
+            attention_mask=torch.ones(len(tokens), dtype=torch.bool))
+        if image_paths:
+            inputs['images'] = self._load_images(image_paths)
+        return inputs
+
+    def decode_answer(self, token_ids):
+        """Decode new tokens only, dropping EOS and following padding."""
+        tokenizer = self._get_tokenizer()
+        ids = list(token_ids)
+        if tokenizer.eos_id() in ids:
+            ids = ids[:ids.index(tokenizer.eos_id())]
+        ids = [
+            i for i in ids if i not in (tokenizer.pad_id(), tokenizer.bos_id())
+        ]
+        return tokenizer.decode(ids).strip()
+
+    def _load_images(self, image_paths):
         images = []
         for image_path in image_paths:
             with Image.open(image_path) as image:
@@ -119,9 +152,4 @@ class ProcessPi05VLMSFTInputs:
             pixels = torch.from_numpy(resized.copy()).float() / 127.5 - 1
         else:
             pixels = torch.empty(0, self.image_size, self.image_size)
-        return dict(
-            data,
-            input_ids=torch.tensor(tokens, dtype=torch.long),
-            labels=torch.tensor(labels, dtype=torch.long),
-            attention_mask=torch.ones(len(tokens), dtype=torch.bool),
-            images=pixels)
+        return pixels

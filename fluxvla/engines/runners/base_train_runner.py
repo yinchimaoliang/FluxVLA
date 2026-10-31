@@ -137,6 +137,10 @@ class BaseTrainRunner(ABC):
         self.training_mode = 'step_based' if max_steps is not None else 'epoch_based'  # noqa: E501
 
         self.vla = build_vla_from_cfg(cfg.model)
+        if train_task == 'vlm' and keep_params_fp32:
+            # Promote before from_pretrained: Pi05 initializes RMSNorm in
+            # BF16, which would otherwise round the source FP32 weights.
+            self.vla.float()
         self.vla.validate_training_task(train_task)
         self.all_module_keys = self.vla.all_module_keys
         if self.vla.llm_backbone is not None:
