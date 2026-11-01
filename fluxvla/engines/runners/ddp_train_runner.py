@@ -131,6 +131,7 @@ class DDPTrainRunner(BaseTrainRunner):
                  static_graph: Optional[bool] = None,
                  keep_lora_trainable_params_fp32: bool = False,
                  train_task: str = 'vla',
+                 mixed_training: Optional[Dict] = None,
                  **kwargs) -> None:
 
         if kwargs:
@@ -163,7 +164,8 @@ class DDPTrainRunner(BaseTrainRunner):
             evaluator=evaluator,
             tokenizer=tokenizer,
             resume_from=resume_from,
-            train_task=train_task)
+            train_task=train_task,
+            mixed_training=mixed_training)
 
         self.cfg = cfg
         self.args = args
@@ -171,7 +173,7 @@ class DDPTrainRunner(BaseTrainRunner):
         self.lora_before_device_move = lora_before_device_move
         self.keep_lora_trainable_params_fp32 = (
             keep_lora_trainable_params_fp32)
-        if train_task == 'vlm' and static_graph is True:
+        if train_task in ('vlm', 'mixed') and static_graph is True:
             raise ValueError('VLM batches can use different visual modules; '
                              'set static_graph=False.')
         self.static_graph = (
@@ -380,6 +382,8 @@ class DDPTrainRunner(BaseTrainRunner):
         train_loss: Optional[float] = None,
     ) -> None:
         """Save checkpoint with DDP and LoRA specific handling."""
+        mixed = getattr(self, '_mixed_training', None)
+        mixed_state = mixed.checkpoint_state() if mixed is not None else None
         if overwatch.is_rank_zero():
 
             overwatch.info(f'Saving Model Checkpoint for Step {global_step}, '
@@ -456,6 +460,8 @@ class DDPTrainRunner(BaseTrainRunner):
                 'global_step': global_step,
                 'epoch': epoch,
             }
+            if mixed_state is not None:
+                checkpoint_dict['mixed_training'] = mixed_state
             if train_model_state_dict is not None:
                 checkpoint_dict['train_model'] = train_model_state_dict
                 checkpoint_dict['ema_decay'] = self.ema_decay
@@ -814,6 +820,8 @@ class DDPTrainRunner(BaseTrainRunner):
         """
         import torch.distributed as dist
 
+        if getattr(self, '_mixed_training', None) is not None:
+            return super().resume()
         if self.resume_from is None:
             return
 
@@ -965,7 +973,7 @@ class DDPTrainRunner(BaseTrainRunner):
 
     def _custom_training_step(self, batch, output, loss):
         """Custom training step for DDP-specific logging and metrics."""
-        if self.train_task == 'vlm':
+        if self.train_task in ('vlm', 'mixed'):
             # BaseTrainRunner already logs the global token-weighted result.
             # Do not replace it with an average of optimizer-step means.
             return None

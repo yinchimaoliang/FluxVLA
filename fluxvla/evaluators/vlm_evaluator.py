@@ -35,8 +35,8 @@ class VLMEvaluator(BaseEvaluator):
 
     @torch.no_grad()
     def run(self, runner, dataset):
-        if runner.train_task != 'vlm':
-            raise ValueError('VLMEvaluator requires train_task="vlm".')
+        if runner.train_task not in ('vlm', 'mixed'):
+            raise ValueError('VLMEvaluator requires train_task=vlm or mixed.')
         if len(dataset) == 0:
             raise ValueError('VLM validation dataset is empty.')
         if getattr(dataset, 'max_retry_times', 0):
@@ -57,8 +57,10 @@ class VLMEvaluator(BaseEvaluator):
                     rank + i * world_size for i in range(
                         start, min(start + self.batch_size, local_size))
                 ]
-                batch = runner.collator(
-                    [dataset[i % len(dataset)] for i in indices])
+                collator = (
+                    runner._mixed_training.vlm_collator
+                    if runner.train_task == 'mixed' else runner.collator)
+                batch = collator([dataset[i % len(dataset)] for i in indices])
                 ignore_index = runner._unwrap_vla().ignore_index
                 for row, index in enumerate(indices):
                     if index >= len(dataset):

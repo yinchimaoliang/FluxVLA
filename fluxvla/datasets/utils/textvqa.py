@@ -14,7 +14,8 @@ def load_textvqa_validation(annotation_path):
     path = Path(annotation_path)
     if not path.is_file():
         raise FileNotFoundError(f'TextVQA annotations missing: {path}. '
-                                'Run tools/prepare_textvqa.py first.')
+                                'Download the official JSON from '
+                                f'{TEXTVQA_VAL_URL} to this path.')
     payload = json.loads(path.read_text(encoding='utf-8'))
     rows = payload.get('data') if isinstance(payload, dict) else None
     if not isinstance(rows, list) or not rows:

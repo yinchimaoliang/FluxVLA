@@ -758,13 +758,15 @@ class PI0FlowMatching(BaseVLA):
         v_t, u_t = self._select_flow_loss_dimensions(v_t, u_t)
         losses = F.mse_loss(u_t, v_t, reduction='none')
         sample_weight = kwarg.get('sample_weight')
+        statistics = kwarg.get('return_loss_statistics', False)
         loss = reduce_action_bc_loss(
-            losses, action_mask=action_masks, sample_weight=sample_weight)
+            losses,
+            action_mask=action_masks,
+            sample_weight=sample_weight,
+            return_statistics=statistics)
 
-        return_dict = dict(
-            predictions=v_t,
-            loss=loss,
-        )
+        return_dict = dict(predictions=v_t)
+        return_dict.update(loss if statistics else dict(loss=loss))
         return return_dict
 
     def _predict_action_plain(self, x_t, denoise, bsize, dt, device):

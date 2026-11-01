@@ -76,7 +76,7 @@ class PI05FlowMatching(PI0FlowMatching):
     def validate_training_task(self, task):
         if task == 'vla':
             return
-        if task != 'vlm':
+        if task not in ('vlm', 'mixed'):
             raise ValueError(f'Unknown training task: {task}')
         if (self.vlm_backbone is not None or self.llm_backbone is None
                 or not hasattr(self.llm_backbone, 'embed_tokens')):
@@ -90,6 +90,9 @@ class PI05FlowMatching(PI0FlowMatching):
     def prepare_training_task(self, task):
         self.validate_training_task(task)
         self._training_task = task
+        if task == 'mixed':
+            # The expert consumes projected actions and never embeds tokens.
+            self.llm_expert.embed_tokens.requires_grad_(False)
         if task == 'vlm':
             active = {
                 id(parameter)
@@ -101,6 +104,18 @@ class PI05FlowMatching(PI0FlowMatching):
             for parameter in self.parameters():
                 if id(parameter) not in active:
                     parameter.requires_grad_(False)
+
+    def inactive_training_parameters(self, task):
+        """Parameters skipped by a task, including FSDP's zero grad slices."""
+        if task == 'vlm':
+            active = {
+                id(p)
+                for module in (self.vision_backbone, self.projector,
+                               self.llm_backbone) if module is not None
+                for p in module.parameters()
+            }
+            return [p for p in self.parameters() if id(p) not in active]
+        return list(self.llm_expert.embed_tokens.parameters())
 
     def get_vlm_fsdp_wrapping_policy(self):
         self.validate_training_task('vlm')
@@ -114,12 +129,35 @@ class PI05FlowMatching(PI0FlowMatching):
 
         return wrap_policy
 
+    def get_mixed_fsdp_wrapping_policy(self):
+        """Shard MLP calls shared by joint attention and causal decoding.
+
+        Keep vision in the root: ranks can have text-only/image VLM batches
+        in the same step. The expert MLPs run on every rank's VLA steps and
+        are skipped on every rank's VLM steps. Gemma attention weights and
+        the tied vocabulary head stay in the root for direct weight access.
+        """
+        self.validate_training_task('mixed')
+        mlps = {
+            layer.mlp
+            for backbone in (self.llm_backbone, self.llm_expert)
+            for layer in backbone.layers
+        }
+
+        def wrap_policy(module, recurse, nonwrapped_numel):
+            return recurse or module in mlps
+
+        return wrap_policy
+
     def get_fsdp_execution_block_wrapping_policy(self):
         if getattr(self, '_training_task', 'vla') == 'vlm':
             return self.get_vlm_fsdp_wrapping_policy()
         return super().get_fsdp_execution_block_wrapping_policy()
 
     def forward(self, *args, task='vla', **batch):
+        if task == 'mixed':
+            raise ValueError('Mixed training dispatches one vla or vlm '
+                             'task per forward call.')
         self.validate_training_task(task)
         if task == 'vlm':
             return self.forward_vlm(*args, **batch)

@@ -109,6 +109,7 @@ class FSDPTrainRunner(BaseTrainRunner):
                  tokenizer: Optional[Dict] = None,
                  resume_from: Optional[str] = None,
                  train_task: str = 'vla',
+                 mixed_training: Optional[Dict] = None,
                  args=None,
                  *_unused_args,
                  **kwargs) -> None:
@@ -142,7 +143,8 @@ class FSDPTrainRunner(BaseTrainRunner):
             evaluator=evaluator,
             tokenizer=tokenizer,
             resume_from=resume_from,
-            train_task=train_task)
+            train_task=train_task,
+            mixed_training=mixed_training)
         self.cfg = cfg
         self.args = args
         self.max_grad_norm = max_grad_norm
@@ -289,6 +291,8 @@ class FSDPTrainRunner(BaseTrainRunner):
             'FSDPStrategy.save_checkpoint assumes VLA is \
                 already wrapped in FSDP!'
 
+        mixed = getattr(self, '_mixed_training', None)
+        mixed_state = mixed.checkpoint_state() if mixed is not None else None
         if hasattr(self.vla._fsdp_wrapped_module, 'llm_backbone'):
             if hasattr(self.vla._fsdp_wrapped_module.llm_backbone, 'config'):
                 self.vla._fsdp_wrapped_module.llm_backbone.config.to_json_file(  # noqa: E501
@@ -371,6 +375,8 @@ class FSDPTrainRunner(BaseTrainRunner):
                     'global_step': global_step,
                     'epoch': epoch,
                 }
+                if mixed_state is not None:
+                    checkpoint_dict['mixed_training'] = mixed_state
                 if train_model_state_dicts is not None:
                     checkpoint_dict['train_model'] = train_model_state_dicts
                     checkpoint_dict['ema_decay'] = self.ema_decay
@@ -436,6 +442,9 @@ class FSDPTrainRunner(BaseTrainRunner):
 
         if is_no_shard or self.fsdp_wrap_policy == 'root':
             vla_fsdp_wrapping_policy = None
+        elif self.train_task == 'mixed':
+            vla_fsdp_wrapping_policy = (
+                self.vla.get_mixed_fsdp_wrapping_policy())
         elif self.fsdp_wrap_policy == 'execution-block':
             policy_getter = getattr(
                 self.vla, 'get_fsdp_execution_block_wrapping_policy', None)
@@ -697,7 +706,7 @@ class FSDPTrainRunner(BaseTrainRunner):
         try:
             # New API: optim_state_dict_to_load
             sharded_osd = FSDP.optim_state_dict_to_load(
-                full_osd, self.vla, self.optimizer)
+                self.vla, self.optimizer, full_osd)
         except (AttributeError, TypeError):
             # Fall back to deprecated API for older PyTorch versions
             sharded_osd = FSDP.shard_full_optim_state_dict(full_osd, self.vla)

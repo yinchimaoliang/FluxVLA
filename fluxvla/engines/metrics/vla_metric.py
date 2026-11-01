@@ -338,7 +338,7 @@ class VLAMetric:
         self.dataset_trackers[dataset_name].commit(**kwargs)
 
     @overwatch.rank_zero_only
-    def push(self) -> str:
+    def push(self, extra_metrics: Optional[Dict] = None) -> str:
         # Note :: Raw Loss is an Average over
         # Gradient Accumulation Steps --> No Smoothing!
         loss_raw = torch.stack(list(self.state['loss_raw'])).mean().item()
@@ -371,7 +371,10 @@ class VLAMetric:
             })
 
         # Fire to Trackers
-        prefix = 'VLM Train' if self.train_task == 'vlm' else 'VLA Train'
+        prefix = {
+            'vlm': 'VLM Train',
+            'mixed': 'Mixed Train'
+        }.get(self.train_task, 'VLA Train')
         # Format lr to ensure at least 6 decimal places
         lr_formatted = f'{lr:.7f}'
         extra_scalar_metrics = {}
@@ -399,6 +402,7 @@ class VLAMetric:
                 f'{prefix}/Step Time': step_time,
                 **dataset_metrics,
                 **extra_scalar_metrics,
+                **(extra_metrics or {}),
             },
         )
         return status
