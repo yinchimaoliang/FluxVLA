@@ -32,7 +32,7 @@ vlm_dataloader = dict(
                 weight=665118 / 8192),
         ],
         data_root_path=[
-            '/mnt/data/oss/raw_data/llava665k',
+            './datasets/llava665k',
             './datasets/vlm/robocasa_egodex',
         ],
         index_cache_dir='./datasets/vlm/robocasa_egodex/.index',

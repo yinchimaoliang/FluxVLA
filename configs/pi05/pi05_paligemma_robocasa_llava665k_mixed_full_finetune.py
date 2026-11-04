@@ -1,5 +1,5 @@
 # Copyright 2026 Limx Dynamics
-"""Pi05 RoboCasa + OSS LLaVA-665K, paired with the VLA-only control.
+"""Pi05 RoboCasa + raw LLaVA-665K, paired with the VLA-only control.
 
 40,000 total updates = 30,000 VLA + 10,000 VLM at a 3:1 task ratio.
 Both tasks use global batch 16 on two 80-GB GPUs. This matches the control's
@@ -9,6 +9,8 @@ robot-data exposure, while adding language updates and their compute cost.
 
 _base_ = './pi05_paligemma_robocasa_vla_control_full_finetune.py'
 
+llava_root = './datasets/llava665k'
+
 vlm_dataloader = dict(
     per_device_batch_size=1,
     per_device_num_workers=0,
@@ -16,9 +18,9 @@ vlm_dataloader = dict(
     collator=dict(type='Pi05VLMSFTCollator', pad_token_id=0),
     dataset=dict(
         type='LLaVAFormatDataset',
-        anno_json_path='./datasets/vlm/llava665k/train.jsonl',
-        data_root_path='/mnt/data/oss/limx_mani_data/raw_data/llava665k',
-        index_cache_dir='./datasets/vlm/llava665k/.index',
+        anno_json_path=llava_root + '/llava_v1_5_mix665k.json',
+        data_root_path=llava_root,
+        index_cache_dir='./datasets/.cache/vlm',
         seed=_base_.runner.seed,
         transforms=[
             dict(type='BuildVLMMessages'),

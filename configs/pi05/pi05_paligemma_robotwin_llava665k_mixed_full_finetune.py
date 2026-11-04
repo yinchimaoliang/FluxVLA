@@ -1,5 +1,5 @@
 # Copyright 2026 Limx Dynamics
-"""Pi05 mixed RoboTwin action training and OSS LLaVA-665K language SFT.
+"""Pi05 mixed RoboTwin action training and raw LLaVA-665K language SFT.
 
 Defaults target two 80-GB GPUs: three VLA updates followed by one VLM update.
 Each update accumulates eight local batches of one sample (global batch 16).
@@ -7,6 +7,8 @@ Each update accumulates eight local batches of one sample (global batch 16).
 """
 
 _base_ = './pi05_paligemma_robotwin_all_data_full_finetune.py'
+
+llava_root = './datasets/llava665k'
 
 model = dict(
     freeze_llm_expert=False,
@@ -19,14 +21,10 @@ inference_model = dict(
     preserve_fp32_residuals=True,
     vision_backbone=dict(preserve_fp32_residuals=True))
 
-# Reuse the complete robot pipeline, overriding only runtime data locations.
+# Reuse the robot pipeline and README's datasets/robotwin_lerobotv2.1 layout.
 train_dataloader = _base_.train_dataloader
 train_dataloader.per_device_batch_size = 1
 train_dataloader.per_device_num_workers = 0
-train_dataloader.dataset.datasets[0].data_root_path = [
-    'datasets/robotwin_clean_lerobotv2.1',
-    'datasets/robotwin_randomized_lerobotv2.1',
-]
 
 vlm_dataloader = dict(
     per_device_batch_size=1,
@@ -35,9 +33,9 @@ vlm_dataloader = dict(
     collator=dict(type='Pi05VLMSFTCollator', pad_token_id=0),
     dataset=dict(
         type='LLaVAFormatDataset',
-        anno_json_path='./datasets/vlm/llava665k/train.jsonl',
-        data_root_path='/mnt/data/oss/limx_mani_data/raw_data/llava665k',
-        index_cache_dir='./datasets/vlm/llava665k/.index',
+        anno_json_path=llava_root + '/llava_v1_5_mix665k.json',
+        data_root_path=llava_root,
+        index_cache_dir='./datasets/.cache/vlm',
         seed=42,
         transforms=[
             dict(type='BuildVLMMessages'),
@@ -74,9 +72,8 @@ eval = dict(
     _delete_=True,
     type='TextVQAEvalRunner',
     checkpoint_dir='work_dirs/pi05_robotwin_llava665k_mixed/checkpoints',
-    annotation_path='./datasets/vlm/textvqa/TextVQA_0.5.1_val.json',
-    image_root=('/mnt/data/oss/limx_mani_data/raw_data/'
-                'llava665k/textvqa/train_images'),
+    annotation_path='./datasets/textvqa/TextVQA_0.5.1_val.json',
+    image_root=llava_root + '/textvqa/train_images',
     preprocessing=dict(
         tokenizer_path='./checkpoints/pi05_base',
         image_size=224,

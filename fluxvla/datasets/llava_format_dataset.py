@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from torch.utils.data import Dataset
 
 from fluxvla.engines import DATASETS, build_transform_from_cfg
-from .utils.vlm_annotations import IndexedJSONL, iter_json_records
+from .utils.vlm_annotations import IndexedJSON, IndexedJSONL
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +50,7 @@ class _WeightedSource(Sequence):
         return self.records[row]
 
 
-def _load_json_source(source,
-                      index_cache_dir=None,
-                      seed=0,
-                      max_json_bytes=64 << 20):
+def _load_json_source(source, index_cache_dir=None, seed=0):
     source = {
         'path': os.fspath(source)
     } if isinstance(source, (str, os.PathLike)) else source
@@ -67,11 +64,7 @@ def _load_json_source(source,
     if path.lower().endswith(('.jsonl', '.ndjson')):
         records = IndexedJSONL(path, index_cache_dir)
     else:
-        if os.path.getsize(path) > max_json_bytes:
-            raise ValueError(
-                f'{path}: large JSON arrays must first be converted to JSONL '
-                'before loading this dataset.')
-        records = list(iter_json_records(path))
+        records = IndexedJSON(path, index_cache_dir)
     return _WeightedSource(records, weight, seed)
 
 
@@ -82,7 +75,8 @@ class LLaVAFormatDataset(Dataset):
     ``anno_json_path`` accepts a path or a list of paths / ``{path, weight}``
     dictionaries. Weights are repeat factors, not mixture probabilities.
     Fractional weights use a fixed seeded permutation, not per-epoch sampling.
-    JSONL uses a disk-backed index; JSON arrays are limited to 64 MiB.
+    JSON arrays/objects and JSONL use disk-backed byte-offset indices.
+    Raw JSON needs no file-size cap or conversion; rows are loaded on demand.
     Without transforms, samples are raw annotations plus ``data_root``.
     All conversation/media/processor handling belongs to the configured
     transforms, built with the same registry as ParquetDataset.
@@ -145,8 +139,7 @@ class LLaVAFormatDataset(Dataset):
     def _build_sample(self, index):
         source_index = bisect_right(self._ends, index)
         start = self._ends[source_index - 1] if source_index else 0
-        # In-memory JSON sources and virtual repeats may share nested objects.
-        # Never let an in-place transform alter future reads of a raw record.
+        # Isolate in-place transforms from source records and virtual repeats.
         data = copy.deepcopy(self._sources[source_index][index - start])
         data['data_root'] = self._roots[source_index]
         for transform in self.transforms:

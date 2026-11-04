@@ -1,9 +1,11 @@
 # Copyright 2026 Limx Dynamics
-"""Pi05 VLM SFT on OSS LLaVA-665K using the pretrained PaliGemma vocabulary.
+"""Pi05 VLM SFT on raw LLaVA-665K using the pretrained PaliGemma vocabulary.
 
 Reuses the Pi05 base checkpoint and keeps action parameters for later VLA use.
 TextVQA official validation is evaluated after training; all SFT rows remain.
 """
+
+llava_root = './datasets/llava665k'
 
 model = dict(
     action_in_proj=dict(in_dim=32, out_dim=1024, type='LinearProjector'),
@@ -149,9 +151,9 @@ runner = dict(
     type='FSDPTrainRunner')
 train_dataloader = dict(
     dataset=dict(
-        anno_json_path='./datasets/vlm/llava665k/train.jsonl',
-        data_root_path='/mnt/data/oss/limx_mani_data/raw_data/llava665k',
-        index_cache_dir='./datasets/vlm/llava665k/.index',
+        anno_json_path=llava_root + '/llava_v1_5_mix665k.json',
+        data_root_path=llava_root,
+        index_cache_dir='./datasets/.cache/vlm',
         seed=42,
         transforms=[
             dict(type='BuildVLMMessages'),
@@ -169,9 +171,8 @@ train_dataloader = dict(
 eval = dict(
     type='TextVQAEvalRunner',
     checkpoint_dir='work_dirs/pi05_vlm_sft/checkpoints',
-    annotation_path='./datasets/vlm/textvqa/TextVQA_0.5.1_val.json',
-    image_root=('/mnt/data/oss/limx_mani_data/raw_data/'
-                'llava665k/textvqa/train_images'),
+    annotation_path='./datasets/textvqa/TextVQA_0.5.1_val.json',
+    image_root=llava_root + '/textvqa/train_images',
     preprocessing=dict(
         tokenizer_path='./checkpoints/pi05_base',
         image_size=224,

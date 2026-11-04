@@ -1,15 +1,13 @@
 # Copyright 2026 Limx Dynamics
-"""Qwen3-VL-2B full SFT on the OSS-mounted LLaVA-665K dataset.
+"""Qwen3-VL-2B full SFT on the original LLaVA-665K dataset.
 
-The VS Code pre-launch task prepares the local JSONL annotations once.
-Weights and images are read from the existing OSS filesystem mount.
+The dataset indexes the original JSON once; no JSONL preparation is needed.
+Run from the repository root after following the README data preparation.
 """
 
-model_path = (
-    '/mnt/data/oss/limx_mani_checkpoints/open_source/Qwen3-VL-2B-Instruct')
-media_root = '/mnt/data/oss/limx_mani_data/raw_data/llava665k'
-source_annotations = media_root + '/llava_v1_5_mix665k.json'
-train_annotations = './datasets/vlm/llava665k/train.jsonl'
+model_path = './checkpoints/Qwen3-VL-2B-Instruct'
+media_root = './datasets/llava665k'
+train_annotations = media_root + '/llava_v1_5_mix665k.json'
 
 model = dict(
     type='VLMWrapper',
@@ -29,7 +27,7 @@ train_dataloader = dict(
         type='LLaVAFormatDataset',
         anno_json_path=train_annotations,
         data_root_path=media_root,
-        index_cache_dir='./datasets/vlm/llava665k/.index',
+        index_cache_dir='./datasets/.cache/vlm',
         transforms=[
             dict(type='BuildVLMMessages'),
             dict(

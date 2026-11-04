@@ -1,8 +1,10 @@
 # Copyright 2026 Limx Dynamics
 """Native Qwen3-VL / Qwen3.5 SFT over LLaVA JSON or JSONL annotations.
 
-Set FLUXVLA_VLM_PATH and FLUXVLA_VLM_TRAIN before launching. Set
-FLUXVLA_VLM_PROCESSOR=qwen3_5 for Qwen3.5 and FLUXVLA_VLM_VAL for validation.
+Defaults use Qwen3-VL-2B and raw LLaVA-665K prepared as in the README.
+Override FLUXVLA_VLM_PATH, FLUXVLA_VLM_TRAIN and FLUXVLA_VLM_MEDIA as needed.
+Set FLUXVLA_VLM_PROCESSOR=qwen3_5 for Qwen3.5.
+Use FLUXVLA_VLM_VAL for validation.
 The processor and model must refer to the same checkpoint/token vocabulary.
 """
 
@@ -11,10 +13,10 @@ import os
 model_path = os.environ.get('FLUXVLA_VLM_PATH',
                             './checkpoints/Qwen3-VL-2B-Instruct')
 processor_type = os.environ.get('FLUXVLA_VLM_PROCESSOR', 'qwen3_vl')
+media_root = os.environ.get('FLUXVLA_VLM_MEDIA', './datasets/llava665k')
 train_annotations = os.environ.get('FLUXVLA_VLM_TRAIN',
-                                   './datasets/vlm/train.jsonl')
+                                   media_root + '/llava_v1_5_mix665k.json')
 val_annotations = os.environ.get('FLUXVLA_VLM_VAL')
-media_root = os.environ.get('FLUXVLA_VLM_MEDIA', './datasets/vlm')
 
 model = dict(
     type='VLMWrapper',
@@ -45,6 +47,7 @@ train_dataloader = dict(
         type='LLaVAFormatDataset',
         anno_json_path=train_annotations,
         data_root_path=media_root,
+        index_cache_dir='./datasets/.cache/vlm',
         transforms=transforms,
         seed=42))
 
@@ -80,6 +83,7 @@ if val_annotations:
         type='LLaVAFormatDataset',
         anno_json_path=val_annotations,
         data_root_path=media_root,
+        index_cache_dir='./datasets/.cache/vlm',
         transforms=transforms,
         max_retry_times=0,
         seed=42)
