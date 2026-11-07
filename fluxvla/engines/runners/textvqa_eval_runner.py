@@ -14,7 +14,8 @@ import torch
 import torch.distributed as dist
 from safetensors.torch import load_file
 
-from fluxvla.datasets.utils.textvqa import (load_textvqa_validation,
+from fluxvla.datasets.utils.textvqa import (load_textvqa_ocr_prompts,
+                                            load_textvqa_validation,
                                             validate_textvqa_images)
 from fluxvla.engines.utils import build_vla_from_cfg, initialize_overwatch
 from fluxvla.engines.utils.name_map import str_to_dtype
@@ -56,7 +57,7 @@ def resolve_vlm_checkpoint(path, checkpoint_dir=None):
 
 @RUNNERS.register_module()
 class TextVQAEvalRunner:
-    """Generate from images/questions only, then score against annotations.
+    """Generate from images/questions (optionally OCR), then score answers.
 
     Each rank owns an unsharded frozen model and disjoint question indices.
     No distributed forward collectives or padding duplicates are introduced;
@@ -80,10 +81,14 @@ class TextVQAEvalRunner:
                  mixed_precision_dtype='bf16',
                  keep_params_fp32=True,
                  device=None,
-                 seed=42):
+                 seed=42,
+                 ocr_question_path=None):
         self.cfg = cfg
         self.annotation_path = Path(annotation_path)
         self.image_root = Path(image_root)
+        self.ocr_question_path = (
+            Path(ocr_question_path) if ocr_question_path is not None else None)
+        self.ocr_prompts = None
         self.processor = ProcessPi05VLMSFTInputs(**preprocessing)
         self.checkpoint = resolve_vlm_checkpoint(ckpt_path, checkpoint_dir)
         self.compare_base = compare_base or self.checkpoint is None
@@ -112,6 +117,9 @@ class TextVQAEvalRunner:
         if self.device.type == 'cuda':
             torch.cuda.set_device(self.device)
         rows = load_textvqa_validation(self.annotation_path)
+        if self.ocr_question_path is not None:
+            self.ocr_prompts = load_textvqa_ocr_prompts(
+                self.ocr_question_path, rows)
         self.dataset_size = len(rows)
         self.rows = rows[:self.max_samples]
         validate_textvqa_images(self.rows, self.image_root)
@@ -148,7 +156,11 @@ class TextVQAEvalRunner:
         for completed, index in enumerate(
                 range(self.rank, len(self.rows), self.world_size), start=1):
             row = self.rows[index]
-            prompt = row['question'] + self.prompt_suffix
+            # The OCR file already contains the short-answer instruction.
+            # Keep the no-OCR path unchanged for historical comparability.
+            prompt = (
+                self.ocr_prompts[row['question_id']] if self.ocr_prompts
+                is not None else row['question'] + self.prompt_suffix)
             inputs = self.processor.encode_prompt(
                 prompt, [self.image_root / f'{row["image_id"]}.jpg'])
             inputs = {
@@ -224,9 +236,19 @@ class TextVQAEvalRunner:
                 evaluated_questions=len(self.rows),
                 selection='first_n_in_official_order'),
             protocol=dict(
-                inputs='image_and_question',
-                external_ocr=False,
-                prompt_suffix=self.prompt_suffix,
+                inputs=('image_question_and_external_ocr'
+                        if self.ocr_question_path else 'image_and_question'),
+                external_ocr=self.ocr_question_path is not None,
+                prompt_suffix=(None if self.ocr_question_path else
+                               self.prompt_suffix),
+                ocr_question_path=(str(self.ocr_question_path.resolve())
+                                   if self.ocr_question_path else None),
+                ocr_question_sha256=(hashlib.sha256(
+                    self.ocr_question_path.read_bytes()).hexdigest()
+                                     if self.ocr_question_path else None),
+                prompt_source=('llava_v1_5_ocr_question_file'
+                               if self.ocr_question_path else
+                               'official_question_plus_suffix'),
                 decoding='greedy',
                 max_new_tokens=self.max_new_tokens,
                 image_size=self.processor.image_size,
@@ -267,7 +289,8 @@ class TextVQAEvalRunner:
             '# TextVQA validation', '',
             f'Checkpoint: `{report["checkpoint"]}`', '',
             f'Questions: {len(self.rows)} / {self.dataset_size}. '
-            'Image + question; no external OCR; greedy decoding.', '',
+            f'Image + question; external OCR: '
+            f'{report["protocol"]["external_ocr"]}; greedy decoding.', '',
             '| Model | TextVQA accuracy | Token limit reached |',
             '| --- | ---: | ---: |'
         ]
@@ -281,8 +304,20 @@ class TextVQAEvalRunner:
             lines += ['', 'Subset smoke check; not a full validation score.']
         lines += [
             '', 'Scores use ten human answers per question and EvalAI '
-            'normalization. This is not the OCR-assisted LLaVA protocol.', ''
+            'normalization.'
         ]
+        if self.ocr_question_path is None:
+            lines += [
+                'No external OCR: do not compare this directly with '
+                'OCR-assisted LLaVA scores.'
+            ]
+        else:
+            lines += [
+                'Uses the LLaVA-1.5 OCR question text, but Pi05 image '
+                'processing and tokenization. This is an OCR-assisted '
+                'score, NOT an improvement under the no-OCR protocol.'
+            ]
+        lines += ['']
         (self.run_dir / 'summary.md').write_text('\n'.join(lines))
 
     def cleanup(self):

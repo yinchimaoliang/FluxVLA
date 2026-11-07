@@ -197,6 +197,9 @@ class IndexedJSONL(Sequence):
     File handles are reopened after fork/spawn, and reads use pread.
     """
 
+    _magic = _MAGIC
+    _index_suffix = '.idx'
+
     def __init__(self, path, cache_dir=None):
         self._fd = self._mapping = self._pid = None
         self.path = str(Path(path).expanduser().resolve())
@@ -204,7 +207,8 @@ class IndexedJSONL(Sequence):
         cache = Path(cache_dir or '~/.cache/fluxvla/vlm_annotations')
         cache = cache.expanduser()
         cache.mkdir(parents=True, exist_ok=True)
-        self.index_path = str(cache / (self.fingerprint.decode() + '.idx'))
+        self.index_path = str(cache /
+                              (self.fingerprint.decode() + self._index_suffix))
         with FileLock(self.index_path + '.lock'):
             if not self._valid_index():
                 self._build_index()
@@ -216,7 +220,7 @@ class IndexedJSONL(Sequence):
             with open(self.index_path, 'rb') as stream:
                 magic, fingerprint, count = _HEADER.unpack(
                     stream.read(_HEADER.size))
-                if (magic != _MAGIC or fingerprint != self.fingerprint
+                if (magic != self._magic or fingerprint != self.fingerprint
                         or os.fstat(stream.fileno()).st_size !=
                         _HEADER.size + count * _ENTRY.size):
                     return False
@@ -225,31 +229,34 @@ class IndexedJSONL(Sequence):
         except (OSError, struct.error):
             return False
 
+    def _iter_offsets(self):
+        with open(self.path, 'rb') as source:
+            offset = 0
+            for line_number, line in enumerate(source, 1):
+                if line.strip():
+                    try:
+                        _check_record(json.loads(line))
+                    except ValueError as error:
+                        raise ValueError(
+                            f'{self.path}:{line_number}: {error}') from error
+                    yield offset, len(line)
+                offset += len(line)
+
     def _build_index(self):
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
                     dir=os.path.dirname(self.index_path), delete=False) as out:
                 temporary = out.name
-                out.write(_HEADER.pack(_MAGIC, self.fingerprint, 0))
+                out.write(_HEADER.pack(self._magic, self.fingerprint, 0))
                 count = 0
-                with open(self.path, 'rb') as source:
-                    offset = 0
-                    for line_number, line in enumerate(source, 1):
-                        if line.strip():
-                            try:
-                                _check_record(json.loads(line))
-                            except ValueError as error:
-                                raise ValueError(
-                                    f'{self.path}:{line_number}: {error}'
-                                ) from error
-                            out.write(_ENTRY.pack(offset, len(line)))
-                            count += 1
-                        offset += len(line)
+                for offset, length in self._iter_offsets():
+                    out.write(_ENTRY.pack(offset, length))
+                    count += 1
                 if _fingerprint(self.path) != self.fingerprint:
                     raise RuntimeError('Annotation changed during indexing.')
                 out.seek(0)
-                out.write(_HEADER.pack(_MAGIC, self.fingerprint, count))
+                out.write(_HEADER.pack(self._magic, self.fingerprint, count))
                 out.flush()
                 os.fsync(out.fileno())
             os.replace(temporary, self.index_path)
@@ -262,7 +269,7 @@ class IndexedJSONL(Sequence):
 
     def __getitem__(self, index):
         if not isinstance(index, int):
-            raise TypeError('JSONL index must be an integer.')
+            raise TypeError('Annotation index must be an integer.')
         if index < 0:
             index += len(self)
         if not 0 <= index < len(self):
@@ -296,12 +303,110 @@ class IndexedJSONL(Sequence):
         self.close()
 
 
-def iter_json_records(path, chunk_size=65536, max_record_chars=64 << 20):
-    """Stream JSON arrays/objects or JSONL without a full-file read.
+class IndexedJSON(IndexedJSONL):
+    """Index UTF-8 JSON arrays/objects directly, without writing a JSONL copy.
 
-    A bounded record buffer catches accidentally enormous/broken records.
-    Array delimiters and trailing garbage are checked, not silently skipped.
+    Only the current record and a read buffer are held while indexing.
+    Byte ranges refer to the unmodified source, including UTF-8/CRLF input.
+    Locking, atomic publication and worker-safe reads are shared with JSONL.
     """
+
+    _magic = b'FVJSONA1'
+    _index_suffix = '.json.idx'
+
+    def _iter_offsets(self):
+        for _, offset, length in _iter_json_document(self.path):
+            yield offset, length
+
+
+def _iter_json_document(path, chunk_size=65536, max_record_chars=64 << 20):
+    """Yield validated records and their original UTF-8 byte ranges.
+
+    The buffer limit applies to ONE record, not the file's total size.
+    Decoding validates nested structures, string escapes and delimiters.
+    """
+    if chunk_size < 1 or max_record_chars < 1:
+        raise ValueError('JSON chunk and record limits must be positive.')
+    decoder = json.JSONDecoder()
+    # Disable universal newline translation: index offsets address raw bytes.
+    with Path(path).open(encoding='utf-8', newline='') as stream:
+        buffer, eof, offset = '', False, 0
+
+        def consume(count, byte_count=None):
+            nonlocal buffer, offset
+            offset += (
+                len(buffer[:count].encode('utf-8'))
+                if byte_count is None else byte_count)
+            buffer = buffer[count:]
+
+        def fill():
+            nonlocal buffer, eof
+            block = stream.read(chunk_size)
+            buffer += block
+            eof = not block
+
+        def whitespace():
+            while True:
+                count = len(buffer) - len(buffer.lstrip(' \t\r\n'))
+                consume(count, count)
+                if buffer or eof:
+                    return
+                fill()
+
+        fill()
+        if buffer.startswith('\ufeff'):
+            consume(1, 3)
+        whitespace()
+        if not buffer:
+            return
+        is_array = buffer.startswith('[')
+        if is_array:
+            consume(1, 1)
+        need_item = False
+        while True:
+            whitespace()
+            if is_array and buffer.startswith(']'):
+                if need_item:
+                    raise ValueError('Trailing comma in JSON array.')
+                consume(1, 1)
+                break
+            while True:
+                try:
+                    item, end = decoder.raw_decode(buffer)
+                    break
+                except json.JSONDecodeError:
+                    if len(buffer) > max_record_chars:
+                        raise ValueError(
+                            'JSON record exceeds reader buffer limit.')
+                    if eof:
+                        raise
+                    fill()
+            if end > max_record_chars:
+                raise ValueError('JSON record exceeds reader buffer limit.')
+            item = _check_record(item)
+            start = offset
+            length = len(buffer[:end].encode('utf-8'))
+            consume(end, length)
+            yield item, start, length
+            if not is_array:
+                break
+            whitespace()
+            if buffer.startswith(','):
+                consume(1, 1)
+                need_item = True
+            elif buffer.startswith(']'):
+                consume(1, 1)
+                break
+            else:
+                raise ValueError(
+                    'Expected comma or closing JSON array bracket.')
+        whitespace()
+        if buffer:
+            raise ValueError('Trailing data after JSON document.')
+
+
+def iter_json_records(path, chunk_size=65536, max_record_chars=64 << 20):
+    """Stream JSON arrays/objects or JSONL without a full-file read."""
     path = Path(path)
     if path.suffix.lower() in ('.jsonl', '.ndjson'):
         with path.open(encoding='utf-8') as stream:
@@ -313,62 +418,5 @@ def iter_json_records(path, chunk_size=65536, max_record_chars=64 << 20):
                         raise ValueError(
                             f'{path}:{number}: {error}') from error
         return
-    decoder = json.JSONDecoder()
-    with path.open(encoding='utf-8') as stream:
-        buffer, eof = '', False
-
-        def fill():
-            nonlocal buffer, eof
-            block = stream.read(chunk_size)
-            buffer += block
-            eof = not block
-            if len(buffer) > max_record_chars:
-                raise ValueError(
-                    'JSON record exceeds preparation buffer limit.')
-
-        def whitespace():
-            nonlocal buffer
-            buffer = buffer.lstrip()
-            while not buffer and not eof:
-                fill()
-                buffer = buffer.lstrip()
-
-        whitespace()
-        if not buffer:
-            return
-        is_array = buffer.startswith('[')
-        if is_array:
-            buffer = buffer[1:]
-        need_item = False
-        while True:
-            whitespace()
-            if is_array and buffer.startswith(']'):
-                if need_item:
-                    raise ValueError('Trailing comma in JSON array.')
-                buffer = buffer[1:]
-                break
-            while True:
-                try:
-                    item, end = decoder.raw_decode(buffer)
-                    break
-                except json.JSONDecodeError:
-                    if eof:
-                        raise
-                    fill()
-            yield _check_record(item)
-            buffer = buffer[end:]
-            if not is_array:
-                break
-            whitespace()
-            if buffer.startswith(','):
-                buffer = buffer[1:]
-                need_item = True
-            elif buffer.startswith(']'):
-                buffer = buffer[1:]
-                break
-            else:
-                raise ValueError(
-                    'Expected comma or closing JSON array bracket.')
-        whitespace()
-        if buffer:
-            raise ValueError('Trailing data after JSON document.')
+    for item, _, _ in _iter_json_document(path, chunk_size, max_record_chars):
+        yield item
