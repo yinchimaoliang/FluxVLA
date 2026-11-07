@@ -1,8 +1,13 @@
 # Copyright 2026 Limx Dynamics
 """Pi05 VLM SFT on raw LLaVA-665K using the pretrained PaliGemma vocabulary.
 
-Reuses the Pi05 base checkpoint and keeps action parameters for later VLA use.
-TextVQA official validation is evaluated after training; all SFT rows remain.
+Starts from the Pi05 base checkpoint, not a previous SFT run. Trains all
+LLaVA-665K rows for three epochs and keeps action parameters for later VLA use.
+No standalone TextVQA training annotations or conversion step are required.
+TextVQA validation is evaluation-only, enabled with --eval-after-train.
+
+With 32 ranks, batch 1/rank and accumulation 8, global batch is 256.
+For a different world size, adjust accumulation to keep the same global batch.
 """
 
 llava_root = './datasets/llava665k'
@@ -132,10 +137,10 @@ runner = dict(
     grad_accumulation_steps=8,
     keep_params_fp32=True,
     lr_scheduler=dict(type='linear-warmup+cosine-decay', warmup_ratio=0.03),
-    max_epochs=None,
+    max_epochs=3,
     max_grad_norm=1.0,
     max_keep_ckpts=2,
-    max_steps=1000,
+    max_steps=None,
     metric=dict(
         active_trackers=('jsonl', ),
         run_dir='work_dirs/pi05_vlm_sft',
@@ -143,6 +148,7 @@ runner = dict(
         window_size=1),
     mixed_precision_dtype='bf16',
     optimizer=dict(lr=2e-05, type='AdamW', weight_decay=0.01),
+    resume_from=None,
     sampler='distributed',
     save_iter_interval=250,
     seed=42,
@@ -173,6 +179,7 @@ eval = dict(
     checkpoint_dir='work_dirs/pi05_vlm_sft/checkpoints',
     annotation_path='./datasets/textvqa/TextVQA_0.5.1_val.json',
     image_root=llava_root + '/textvqa/train_images',
+    ocr_question_path=None,
     preprocessing=dict(
         tokenizer_path='./checkpoints/pi05_base',
         image_size=224,
