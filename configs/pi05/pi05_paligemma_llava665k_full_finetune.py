@@ -125,7 +125,7 @@ model = dict(
             torch_dtype='float32',
             vision_use_head=False)))
 runner = dict(
-    collator=dict(pad_token_id=0, type='Pi05VLMSFTCollator'),
+    collator=dict(type='VLMSFTCollator', pad_token_id=0, image_layout='views'),
     enable_gradient_checkpointing=True,
     enable_mixed_precision_training=True,
     fsdp_wrap_policy='model',

@@ -15,7 +15,7 @@ vlm_dataloader = dict(
     per_device_batch_size=1,
     per_device_num_workers=0,
     grad_accumulation_steps=8,
-    collator=dict(type='Pi05VLMSFTCollator', pad_token_id=0),
+    collator=dict(type='VLMSFTCollator', pad_token_id=0, image_layout='views'),
     dataset=dict(
         type='LLaVAFormatDataset',
         anno_json_path=llava_root + '/llava_v1_5_mix665k.json',
