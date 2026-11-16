@@ -191,17 +191,59 @@ class DDPTrainRunner(BaseTrainRunner):
             overwatch.info('Loading DDP model state')
 
         # Load model state dict (DDP-specific)
-        if isinstance(self.vla, DDP):
-            self.vla.module.load_state_dict(
-                checkpoint_model_state, strict=False)
-        else:
-            self.vla.load_state_dict(checkpoint_model_state, strict=False)
+        model = self.vla.module if isinstance(self.vla, DDP) else self.vla
+        if isinstance(model, PeftModel):
+            current = model.state_dict(keep_vars=True)
+            required = {
+                name
+                for name, value in current.items() if value.requires_grad
+            }
+            missing = required - checkpoint_model_state.keys()
+            unexpected = checkpoint_model_state.keys() - current.keys()
+            mismatched = [
+                name for name, value in checkpoint_model_state.items()
+                if name in current and value.shape != current[name].shape
+            ]
+            if missing or unexpected or mismatched:
+                raise ValueError(
+                    'LoRA resume requires matching unmerged training weights; '
+                    f'missing={sorted(missing)[:5]}, '
+                    f'unexpected={sorted(unexpected)[:5]}, '
+                    f'shape_mismatches={mismatched[:5]}.')
+        model.load_state_dict(checkpoint_model_state, strict=False)
 
         if overwatch.is_rank_zero():
             overwatch.info('DDP model state restored from checkpoint')
 
     def _model_uses_lora(self) -> bool:
         return bool(getattr(self.cfg.model, 'use_lora', False))
+
+    def _lora_resume_config(self) -> dict:
+        model = self.vla.module if isinstance(self.vla, DDP) else self.vla
+        config = model.peft_config['default']
+        signature = {
+            key: getattr(config, key, None)
+            for key in ('r', 'lora_alpha', 'lora_dropout', 'fan_in_fan_out',
+                        'bias', 'use_rslora', 'use_dora', 'rank_pattern',
+                        'alpha_pattern')
+        }
+        signature['pretrained_name_or_path'] = getattr(
+            self.cfg.model, 'pretrained_name_or_path', None)
+        return signature
+
+    def _load_lora_training_state(self, checkpoint: dict) -> None:
+        if 'train_model' not in checkpoint or 'lora_resume_config' not in \
+                checkpoint:
+            raise ValueError(
+                'This LoRA checkpoint only contains merged evaluation '
+                'weights and cannot restore adapters and their optimizer '
+                'state. Resume from a checkpoint containing train_model and '
+                'lora_resume_config, or start a fresh fine-tune. The mutable '
+                'run-root adapter is not an exact snapshot of this step.')
+        if checkpoint['lora_resume_config'] != self._lora_resume_config():
+            raise ValueError('LoRA resume configuration differs from the '
+                             'saved adapter or pretrained base configuration.')
+        self._load_model_state(checkpoint['train_model'])
 
     def _cast_lora_params_for_mixed_precision(self) -> bool:
         if not (self.keep_lora_trainable_params_fp32 and isinstance(
@@ -416,6 +458,13 @@ class DDPTrainRunner(BaseTrainRunner):
                 # First, save the current LoRA adapter to save_dir
                 # This is necessary before loading it with
                 # PeftModel.from_pretrained
+                # Keep an immutable, unmerged snapshot at this exact step.
+                # Native merged keys cannot restore a PEFT training model.
+                train_model_state_dict = {
+                    key: value.detach().cpu().clone()
+                    for key, value in self.vla.module.state_dict(
+                        keep_vars=True).items() if value.requires_grad
+                }
                 self.vla.module.save_pretrained(save_dir)
 
                 base_vla = build_vla_from_cfg(self.cfg.model)
@@ -465,7 +514,11 @@ class DDPTrainRunner(BaseTrainRunner):
                 checkpoint_dict['mixed_training'] = mixed_state
             if train_model_state_dict is not None:
                 checkpoint_dict['train_model'] = train_model_state_dict
-                checkpoint_dict['ema_decay'] = self.ema_decay
+                if self._model_uses_lora():
+                    checkpoint_dict['lora_resume_config'] = (
+                        self._lora_resume_config())
+                else:
+                    checkpoint_dict['ema_decay'] = self.ema_decay
 
             # Save optimizer state with parameter name mapping
             # Fix: Directly save state_index -> param_name mapping dictionary
@@ -830,9 +883,14 @@ class DDPTrainRunner(BaseTrainRunner):
             overwatch.info(
                 f'Resuming training from checkpoint: {self.resume_from}')
         checkpoint_info = torch.load(
-            self.resume_from, map_location='cpu', weights_only=True)
+            self.resume_from,
+            map_location='cpu',
+            weights_only=True,
+            mmap=self._model_uses_lora())
 
-        if 'model' in checkpoint_info:
+        if self._model_uses_lora():
+            self._load_lora_training_state(checkpoint_info)
+        elif 'model' in checkpoint_info:
             if (getattr(self, 'ema_decay', None) is not None
                     and 'train_model' in checkpoint_info):
                 self._load_model_state(checkpoint_info['model'])
@@ -918,16 +976,20 @@ class DDPTrainRunner(BaseTrainRunner):
         if overwatch.is_rank_zero():
             overwatch.info(f'Loading checkpoint from: {checkpoint_path}')
 
+        # LoRA restores only its unmerged parameters and optimizer state.
+        # Avoid materializing the much larger merged export on CPU or GPU.
+        use_lora = self._model_uses_lora()
         checkpoint = torch.load(
-            checkpoint_path, map_location='cuda:' + str(self.device_id))
+            checkpoint_path,
+            map_location='cpu' if use_lora else 'cuda:' + str(self.device_id),
+            weights_only=True,
+            mmap=use_lora)
 
         # Load model state dict (DDP-specific)
-        if 'model' in checkpoint:
-            if isinstance(self.vla, DDP):
-                self.vla.module.load_state_dict(
-                    checkpoint['model'], strict=False)
-            else:
-                self.vla.load_state_dict(checkpoint['model'], strict=False)
+        if self._model_uses_lora():
+            self._load_lora_training_state(checkpoint)
+        elif 'model' in checkpoint:
+            self._load_model_state(checkpoint['model'])
             if overwatch.is_rank_zero():
                 overwatch.info('Model state dict loaded')
 

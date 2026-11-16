@@ -159,17 +159,6 @@ class Wan21Backbone(WanBaseBackbone):
                 dtype=torch.bfloat16, device_type=torch.device(device).type):
             batch_size = image.shape[0]
             clip_context = self.image_encoder.encode_image(image)
-            msk = torch.ones(
-                batch_size, num_frames, height // 8, width // 8, device=device)
-            msk[:, 1:] = 0
-            msk = torch.concat([
-                torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1),
-                msk[:, 1:],
-            ],
-                               dim=1)
-            msk = msk.view(batch_size, msk.shape[1] // 4, 4, height // 8,
-                           width // 8)
-            msk = msk.transpose(1, 2)
             image_input = image.transpose(1, 2)
             image_zeros = torch.zeros(
                 batch_size,
@@ -185,6 +174,10 @@ class Wan21Backbone(WanBaseBackbone):
                 dtype=torch.bfloat16)
             with torch.no_grad():
                 y = self.vae.encode(input_video)
+            # Match the source mask to VAE output shape and precision.
+            # A default-FP32 mask promotes the whole BF16 condition to FP32.
+            msk = y.new_zeros((batch_size, 4, *y.shape[2:]))
+            msk[:, :, :1] = 1
             new_image = y[:, :, 0:1]
             y = torch.concat([msk, y], dim=1)
         return clip_context, y, new_image

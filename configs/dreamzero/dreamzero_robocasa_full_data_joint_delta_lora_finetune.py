@@ -125,6 +125,8 @@ model = dict(
         noise_beta_alpha=1.5,
         noise_beta_beta=1.0,
         noise_s=0.999,
+        # Source objective; the separate uniform config is an experiment.
+        action_timestep_weighting='scheduler',
         num_inference_steps=16,
         # Fixed seed 1140; 16 BF16 UniPC updates / 8 DiT evaluations.
         official_inference=True,
@@ -353,7 +355,13 @@ runner = dict(
     grad_accumulation_steps=1,
     # Static DDP fails on the first no_sync backward during accumulation.
     static_graph=False,
-    optimizer=dict(lr=1e-5, type='AdamW', weight_decay=1e-5),
+    # Source conf.yaml overrides PyTorch's default beta1=0.9 with 0.95.
+    optimizer=dict(
+        lr=1e-5,
+        type='AdamW',
+        weight_decay=1e-5,
+        betas=(0.95, 0.999),
+        eps=1e-8),
     max_grad_norm=1.0,
     save_iter_interval=5000,
     max_keep_ckpts=8,

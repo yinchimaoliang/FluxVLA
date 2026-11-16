@@ -54,6 +54,9 @@ class _TinyVLA(nn.Module):
     def from_pretrained(self):
         pass
 
+    def prepare_training_task(self, task):
+        assert task == 'vla'
+
     def forward(self, inputs):
         return self.output(self.llm_expert.block(self.backbone(inputs)))
 
@@ -68,6 +71,8 @@ class _TinyVLA(nn.Module):
 def test_ddp_lora_checkpoint_setup_and_backward(backbone_cls, expert_cls,
                                                 enabled):
     runner = object.__new__(DDPTrainRunner)
+    runner.train_task = 'vla'
+    runner._mixed_training = None
     runner.vla = _TinyVLA(expert_cls)
     runner.cfg = ConfigDict(
         model=dict(

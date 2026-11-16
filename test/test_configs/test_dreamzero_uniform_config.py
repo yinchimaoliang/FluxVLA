@@ -16,7 +16,8 @@ def test_uniform_recipe_starts_fresh_and_only_changes_action_weighting():
         CONFIGS /
         'dreamzero_robocasa_full_data_joint_delta_lora_uniform_finetune.py')
     assert uniform.model.vla_head.action_timestep_weighting == 'uniform'
-    del uniform.model.vla_head.action_timestep_weighting
+    assert original.model.vla_head.action_timestep_weighting == 'scheduler'
+    uniform.model.vla_head.action_timestep_weighting = 'scheduler'
     assert uniform.to_dict() == original.to_dict()
     assert uniform.model.pretrained_name_or_path.endswith('/DreamZero-AgiBot')
     assert uniform.model.use_lora and uniform.model.init_lora_weights is True
@@ -24,6 +25,8 @@ def test_uniform_recipe_starts_fresh_and_only_changes_action_weighting():
     assert uniform.runner.get('resume_from') is None
     assert uniform.runner.max_steps == 100000
     assert uniform.runner.optimizer.lr == 1e-5
+    assert uniform.runner.optimizer.betas == (0.95, 0.999)
+    assert uniform.runner.optimizer.eps == 1e-8
     dataset = uniform.train_dataloader.dataset.datasets
     assert len(dataset.data_root_path) == 24
     assert dataset.max_chunk_size == 4
